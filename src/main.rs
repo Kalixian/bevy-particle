@@ -1,8 +1,15 @@
 use bevy::{
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     post_process::bloom::{Bloom, BloomCompositeMode},
-    sprite_render::AlphaMode2d,
+    mesh::MeshVertexBufferLayoutRef,
     prelude::*,
+    reflect::TypePath,
+    render::render_resource::{
+        AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState,
+        RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    },
+    shader::ShaderRef,
+    sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPipeline, Material2dPlugin},
 };
 
 #[derive(Component)]
@@ -11,9 +18,55 @@ struct Velocity(Vec2);
 #[derive(Component)]
 struct Mass(f32);
 
+/// Unlit material that adds `color.rgb * color.a` onto whatever is behind it.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+struct AdditiveMaterial {
+    #[uniform(0)]
+    color: LinearRgba,
+}
+
+impl Material2d for AdditiveMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/additive.wesl".into()
+    }
+
+    // Puts the mesh in the transparent phase (no depth write, drawn after opaque).
+    fn alpha_mode(&self) -> AlphaMode2d {
+        AlphaMode2d::Blend
+    }
+
+    // Replace the standard alpha blend with additive blending.
+    fn specialize(
+        _pipeline: &Material2dPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            for target in fragment.targets.iter_mut().flatten() {
+                target.blend = Some(BlendState {
+                    // result.rgb = src.rgb * src.a + dst.rgb
+                    color: BlendComponent {
+                        src_factor: BlendFactor::SrcAlpha,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                    // leave destination alpha untouched
+                    alpha: BlendComponent {
+                        src_factor: BlendFactor::Zero,
+                        dst_factor: BlendFactor::One,
+                        operation: BlendOperation::Add,
+                    },
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, Material2dPlugin::<AdditiveMaterial>::default()))
         .add_systems(Startup, setup)
         .add_systems(Update, update_particles)
         .run();
@@ -23,7 +76,7 @@ fn main() {
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut materials: ResMut<Assets<AdditiveMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
     commands.spawn((
@@ -33,12 +86,18 @@ fn setup(
             ..default()
         },
         Tonemapping::TonyMcMapface, // 1. Using a tonemapper that desaturates to white is recommended
-        Bloom::default(),           // 2. Enable bloom for the camera
+        Bloom {
+            composite_mode: BloomCompositeMode::Additive,
+            intensity: 0.3,
+            low_frequency_boost: 0.5,
+            ..Bloom::NATURAL
+        },           // 2. Enable bloom for the camera
         DebandDither::Enabled,      // Optional: bloom causes gradients which cause banding
     ));
 
     let count = 2000;
-    // Circle mesh
+    // One shared circle mesh for every particle
+    let circle = meshes.add(Circle::new(2.));
     for _i in 0..count{
         let x: f32 = rand::random_range(-200.0..200.0);
         let y: f32 = rand::random_range(-200.0..200.0);
@@ -46,18 +105,14 @@ fn setup(
         let speed: f32 = rand::random_range(5.0..50.0);
         let red: f32 = rand::random_range(6.0..9.0);
         let blue: f32 = rand::random_range(6.0..9.0);
+        let alpha: f32 = rand::random_range(0.1..0.3);
 
         commands.spawn((
-            Mesh2d(meshes.add(Circle::new(2.))),
-            // 3. Put something bright in a dark environment to see the effect
-            MeshMaterial2d(
-                //materials.add(Color::srgba(red, 0.0, blue, 0.2))
-                materials.add(ColorMaterial {
-                    color: Color::srgba(red, 0.0, blue, 0.2),
-                    alpha_mode: AlphaMode2d::Blend,
-                    ..default()
-                })
-            ),
+            Mesh2d(circle.clone()),
+            // Bright HDR color (for bloom); alpha scales how much each particle adds
+            MeshMaterial2d(materials.add(AdditiveMaterial {
+                color: LinearRgba::new(red, 0.0, blue, alpha),
+            })),
             Transform::from_translation(Vec3::new(x, y, 0.)),
             Velocity(Vec2::new(angle.cos() * speed, angle.sin() * speed)),
             Mass(1.0),
