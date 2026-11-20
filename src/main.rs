@@ -1,11 +1,15 @@
 use bevy::{
     core_pipeline::tonemapping::{DebandDither, Tonemapping},
     post_process::bloom::{Bloom, BloomCompositeMode},
+    sprite_render::AlphaMode2d,
     prelude::*,
 };
 
 #[derive(Component)]
 struct Velocity(Vec2);
+
+#[derive(Component)]
+struct Mass(f32);
 
 fn main() {
     App::new()
@@ -33,7 +37,7 @@ fn setup(
         DebandDither::Enabled,      // Optional: bloom causes gradients which cause banding
     ));
 
-    let count = 100;
+    let count = 2000;
     // Circle mesh
     for _i in 0..count{
         let x: f32 = rand::random_range(-200.0..200.0);
@@ -43,14 +47,20 @@ fn setup(
         let red: f32 = rand::random_range(6.0..9.0);
         let blue: f32 = rand::random_range(6.0..9.0);
 
-        let velocity = Velocity(Vec2::new(angle.cos() * speed, angle.sin() * speed));
-
         commands.spawn((
-            Mesh2d(meshes.add(Circle::new(3.))),
+            Mesh2d(meshes.add(Circle::new(2.))),
             // 3. Put something bright in a dark environment to see the effect
-            MeshMaterial2d(materials.add(Color::srgb(red, 0.0, blue))),
+            MeshMaterial2d(
+                //materials.add(Color::srgba(red, 0.0, blue, 0.2))
+                materials.add(ColorMaterial {
+                    color: Color::srgba(red, 0.0, blue, 0.2),
+                    alpha_mode: AlphaMode2d::Blend,
+                    ..default()
+                })
+            ),
             Transform::from_translation(Vec3::new(x, y, 0.)),
-            velocity,
+            Velocity(Vec2::new(angle.cos() * speed, angle.sin() * speed)),
+            Mass(1.0),
         ));
     }
 }
@@ -64,10 +74,11 @@ fn update_particles(
         transform.translation.y += velocity.0.y * time.delta_secs();
 
         let distance_from_center = transform.translation.length();
-        let pull_max: f32 = 50.0;
+        let pull_max: f32 = 300000.0;
         let mut pull_strength: f32 = 0.0;
         if distance_from_center > 0.0 {
-            pull_strength = 1.0/(10.0 * distance_from_center * distance_from_center) * pull_max;
+            pull_strength = pull_max / (distance_from_center * distance_from_center).max(1.0);
+            pull_strength = pull_strength.clamp(0.0, 100.0);
         }
         let normalized_direction = -transform.translation.truncate().normalize_or_zero();
         velocity.0 += normalized_direction * pull_strength * time.delta_secs();
