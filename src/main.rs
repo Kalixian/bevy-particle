@@ -9,11 +9,11 @@ mod profiling;
 mod space;
 mod spread;
 
-use bevy::{prelude::*, window::PrimaryWindow};
+use bevy::prelude::*;
 
 use crate::{
     emitter::{EmitterPlugin, ParticleEmitter},
-    modifier::{Modifier, ModifierPlugin, Modifiers},
+    modifier::{Modifier, ModifierPlugin, Modifiers, MouseAttractor},
     gravity::{Gravity, GravityMethod},
     space::ParticleSpace,
     spread::{Shape, Spread},
@@ -30,7 +30,7 @@ fn main() {
         gpu::ParticleGpuPlugin,
     ))
     .add_systems(Startup, spawn_scene)
-    .add_systems(Update, (move_attractor_to_mouse, reset_scene_on_r));
+    .add_systems(Update, reset_scene_on_r);
 
     #[cfg(feature = "profile")]
     app.add_plugins(profiling::ProfilingPlugin);
@@ -51,10 +51,6 @@ fn default_plugins() -> impl PluginGroup {
     #[cfg(not(feature = "profile"))]
     DefaultPlugins
 }
-
-/// Marks an emitter whose first `PointAttractor` follows left clicks and drags.
-#[derive(Component)]
-struct MouseAttractor;
 
 /// Where the stream's attractor starts, in world coordinates.
 const STREAM_ATTRACTOR_START: Vec2 = Vec2::new(300.0, 150.0);
@@ -77,6 +73,12 @@ fn spawn_scene(mut commands: Commands) {
                 softening: 23.0,
                 method: GravityMethod::BarnesHut,
                 theta: 0.5,
+            },
+            // Space-level: while the left mouse button is held, everything is pulled toward
+            // the cursor.
+            MouseAttractor {
+                strength: 2_000_000.0,
+                max_accel: 500.0,
             },
             // Modifiers::new([
             //     Modifier::PointAttractor {
@@ -129,10 +131,8 @@ fn spawn_scene(mut commands: Commands) {
             burst_count: GRAVITY_PARTICLES,
             rate: 0.0,
             lifetime: None,
-            spawn_half_extents: Vec2::splat(200.0),
-            speed: (0.0..20.0).into(),
-            // Mostly small particles with a rare few much larger (and heavier): about half are
-            // under 1.0, about 1 in 100 over 4.4.
+            spawn_half_extents: Vec2::splat(300.0),
+            speed: (0.0..10.0).into(),
             radius: Spread::new(0.4..3.6, Shape::Falloff(36.0)),
             red: (6.0..9.0).into(),
             green: (3.0..5.0).into(),
@@ -142,15 +142,26 @@ fn spawn_scene(mut commands: Commands) {
             mass_per_radius: 6.0,
             ..default()
         },
+        // Modifiers::new([
+        //     Modifier::Vortex {
+        //         offset: Vec2::ZERO,
+        //         strength:  1500.0,
+        //         max_accel:  80.0,
+        //     },
+        //     Modifier::Drag(0.04),
+        // ]),
     ));
 
     // A continuous stream from the left; each particle lives 3-5 seconds
-    // (about 400k alive at once). Emitter-level: pulled toward a point you set with the
-    // mouse; shifts cyan -> orange, fades and shrinks.
+    // (about 400k alive at once). Emitter-level: pulled toward a fixed point, and toward the
+    // cursor while the mouse is held; shifts cyan -> orange, fades and shrinks.
     // commands.spawn((
     //     Name::new("Stream"),
     //     ChildOf(space),
-    //     MouseAttractor,
+    //     MouseAttractor {
+    //         strength: 400_000.0,
+    //         max_accel: 200.0,
+    //     },
     //     Transform::from_translation(STREAM_POSITION.extend(0.0)),
     //     ParticleEmitter {
     //         rate: 100_000.0,
@@ -198,32 +209,3 @@ fn reset_scene_on_r(
     spawn_scene(commands);
 }
 
-/// While the left mouse button is down (click or drag), moves each `MouseAttractor`
-/// emitter's first `PointAttractor` to the cursor.
-fn move_attractor_to_mouse(
-    buttons: Res<ButtonInput<MouseButton>>,
-    window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform)>,
-    mut emitters: Query<(&GlobalTransform, &mut Modifiers), With<MouseAttractor>>,
-) {
-    if !buttons.pressed(MouseButton::Left) {
-        return;
-    }
-    let (camera, camera_transform) = *camera;
-    let Some(target) = window
-        .cursor_position()
-        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok())
-    else {
-        return;
-    };
-
-    for (emitter_transform, mut modifiers) in &mut emitters {
-        let emitter_position = emitter_transform.translation().truncate();
-        if let Some(Modifier::PointAttractor { offset, .. }) = modifiers
-            .iter_mut()
-            .find(|m| matches!(m, Modifier::PointAttractor { .. }))
-        {
-            *offset = target - emitter_position;
-        }
-    }
-}

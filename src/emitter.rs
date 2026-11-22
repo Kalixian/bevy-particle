@@ -5,7 +5,7 @@ use bevy::{
 
 use crate::{
     gpu::GpuSimReady,
-    modifier::{ModifierSystems, ModifierUpload, Modifiers},
+    modifier::{ModifierSystems, ModifierUpload, Modifiers, MouseAttractor},
     spread::{GpuCurve, Spread, NO_CURVE},
 };
 
@@ -200,6 +200,7 @@ fn prepare_emitter_upload(
         &mut EmitterState,
         &GlobalTransform,
         Option<&Modifiers>,
+        Option<&MouseAttractor>,
     )>,
     mut upload: ResMut<EmitterUpload>,
     mut modifier_upload: ResMut<ModifierUpload>,
@@ -213,7 +214,7 @@ fn prepare_emitter_upload(
     upload.emitters.clear();
     upload.curves.clear();
     for slot in &registry.slots {
-        let Some((emitter, mut state, transform, modifiers)) =
+        let Some((emitter, mut state, transform, modifiers, mouse)) =
             slot.and_then(|e| emitters.get_mut(e).ok())
         else {
             upload.emitters.push(GpuEmitter::default());
@@ -229,7 +230,7 @@ fn prepare_emitter_upload(
         }
 
         let position = transform.translation().truncate();
-        let (modifier_offset, modifier_count) = modifier_upload.push(modifiers, position);
+        let (modifier_offset, modifier_count) = modifier_upload.push(modifiers, mouse, position);
 
         let curves = &mut upload.curves;
         let (speed, speed_curve) = emitter.speed.to_gpu(curves);

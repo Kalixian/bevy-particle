@@ -1,10 +1,11 @@
 use bevy::{
     prelude::*,
     render::{extract_resource::ExtractResource, render_resource::ShaderType},
+    window::PrimaryWindow,
 };
 
 /// Shared modifier plumbing. Which particles a modifier affects depends on where the
-/// [`Modifiers`] component sits:
+/// [`Modifiers`] (or [`MouseAttractor`]) component sits:
 /// - on a `ParticleSpace`: every particle in the space;
 /// - on a `ParticleEmitter`: only that emitter's particles.
 ///
@@ -13,11 +14,45 @@ pub struct ModifierPlugin;
 
 impl Plugin for ModifierPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ModifierUpload>().add_systems(
-            PostUpdate,
-            clear_modifier_upload.in_set(ModifierSystems::Clear),
-        );
+        app.init_resource::<ModifierUpload>()
+            .init_resource::<MouseTarget>()
+            .add_systems(Update, update_mouse_target)
+            .add_systems(
+                PostUpdate,
+                clear_modifier_upload.in_set(ModifierSystems::Clear),
+            );
     }
+}
+
+/// While the left mouse button is held, pulls particles toward the cursor like a
+/// [`Modifier::PointAttractor`] there; does nothing while it's released. Put it on a
+/// `ParticleSpace` to pull every particle, or on a `ParticleEmitter` to pull only its own.
+///
+/// It runs after the owner's [`Modifiers`] list and doesn't change it.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MouseAttractor {
+    /// Acceleration = strength / distance², like `PointAttractor`. Negative repels.
+    pub strength: f32,
+    /// Upper limit on the acceleration.
+    pub max_accel: f32,
+}
+
+/// The cursor's world position while the left mouse button is held, otherwise `None`.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct MouseTarget(pub Option<Vec2>);
+
+fn update_mouse_target(
+    buttons: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    mut target: ResMut<MouseTarget>,
+) {
+    let (camera, camera_transform) = *camera;
+    target.0 = buttons
+        .pressed(MouseButton::Left)
+        .then(|| window.cursor_position())
+        .flatten()
+        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok());
 }
 
 /// Upload order: `Clear` runs before any system that calls [`ModifierUpload::push`].
@@ -121,15 +156,31 @@ impl GpuModifier {
 #[extract_app(bevy::render::RenderApp)]
 pub struct ModifierUpload {
     modifiers: Vec<GpuModifier>,
+    /// This frame's [`MouseTarget`], copied in when the upload is cleared.
+    mouse_target: Option<Vec2>,
 }
 
 impl ModifierUpload {
-    /// Appends `modifiers` and returns their `(offset, count)` in the array.
-    pub fn push(&mut self, modifiers: Option<&Modifiers>, origin: Vec2) -> (u32, u32) {
+    /// Appends an owner's `modifiers`, then its [`MouseAttractor`] if the mouse is held, and
+    /// returns their `(offset, count)` in the array. `origin` is the owner's world position.
+    pub fn push(
+        &mut self,
+        modifiers: Option<&Modifiers>,
+        mouse: Option<&MouseAttractor>,
+        origin: Vec2,
+    ) -> (u32, u32) {
         let offset = self.modifiers.len() as u32;
         if let Some(modifiers) = modifiers {
             self.modifiers
                 .extend(modifiers.iter().map(|m| GpuModifier::encode(m, origin)));
+        }
+        if let (Some(mouse), Some(target)) = (mouse, self.mouse_target) {
+            let attractor = Modifier::PointAttractor {
+                offset: target - origin,
+                strength: mouse.strength,
+                max_accel: mouse.max_accel,
+            };
+            self.modifiers.push(GpuModifier::encode(&attractor, origin));
         }
         (offset, self.modifiers.len() as u32 - offset)
     }
@@ -144,6 +195,7 @@ impl ModifierUpload {
     }
 }
 
-fn clear_modifier_upload(mut upload: ResMut<ModifierUpload>) {
+fn clear_modifier_upload(mut upload: ResMut<ModifierUpload>, mouse: Res<MouseTarget>) {
     upload.modifiers.clear();
+    upload.mouse_target = mouse.0;
 }
