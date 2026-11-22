@@ -40,15 +40,17 @@ fn setup(
     let count = 2000;
     // Circle mesh
     for _i in 0..count{
-        let x: f32 = rand::random_range(-200.0..200.0);
-        let y: f32 = rand::random_range(-200.0..200.0);
-        let angle: f32 = rand::random_range(0.0..std::f32::consts::TAU);
-        let speed: f32 = rand::random_range(5.0..50.0);
-        let red: f32 = rand::random_range(6.0..9.0);
-        let blue: f32 = rand::random_range(6.0..9.0);
+        let radius = rand::random_range(1.0..3.0);
+        let mass = radius;
+        let x = rand::random_range(-200.0..200.0);
+        let y = rand::random_range(-200.0..200.0);
+        let angle = rand::random_range(0.0..std::f32::consts::TAU);
+        let speed = rand::random_range(5.0..50.0);
+        let red = rand::random_range(6.0..9.0);
+        let blue = rand::random_range(6.0..9.0);
 
         commands.spawn((
-            Mesh2d(meshes.add(Circle::new(2.))),
+            Mesh2d(meshes.add(Circle::new(radius))),
             // 3. Put something bright in a dark environment to see the effect
             MeshMaterial2d(
                 //materials.add(Color::srgba(red, 0.0, blue, 0.2))
@@ -60,7 +62,7 @@ fn setup(
             ),
             Transform::from_translation(Vec3::new(x, y, 0.)),
             Velocity(Vec2::new(angle.cos() * speed, angle.sin() * speed)),
-            Mass(1.0),
+            Mass(mass),
         ));
     }
 }
