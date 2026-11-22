@@ -1,21 +1,12 @@
 use std::ops::Range;
 
-use bevy::{prelude::*, sprite_render::AlphaMode2d};
+use bevy::prelude::*;
 
-use crate::particle::{EmittedBy, Mass, Particle, ParticleMesh, ParticleSystems, Velocity};
-
-/// The middle layer: spawns particles and owns them.
-pub struct EmitterPlugin;
-
-impl Plugin for EmitterPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(Update, spawn_bursts.in_set(ParticleSystems::Spawn));
-    }
-}
+use crate::particle::GpuParticle;
 
 /// Spawn settings for a set of particles. Spawn it as a child of a `ParticleSpace`.
 ///
-/// Phase 0 spawns `burst_count` particles once, when the emitter is added.
+/// Phase 1 spawns `burst_count` particles once, when the space's GPU buffer is built.
 /// Spawn rate and lifespan come in phase 2.
 #[derive(Component, Debug, Clone)]
 #[require(Transform)]
@@ -35,46 +26,34 @@ pub struct ParticleEmitter {
     pub alpha: f32,
 }
 
-fn spawn_bursts(
-    mut commands: Commands,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    particle_mesh: Res<ParticleMesh>,
-    emitters: Query<(Entity, &ParticleEmitter, &Transform), Added<ParticleEmitter>>,
-) {
-    for (emitter_entity, emitter, emitter_transform) in &emitters {
-        let origin = emitter_transform.translation.truncate();
-
-        for _ in 0..emitter.burst_count {
-            let radius = sample(&emitter.radius);
+impl ParticleEmitter {
+    /// Generates this emitter's burst around `origin`.
+    pub fn burst(&self, origin: Vec2) -> impl Iterator<Item = GpuParticle> + '_ {
+        (0..self.burst_count).map(move |_| {
+            let radius = sample(&self.radius);
             let position = origin
                 + Vec2::new(
-                    sample(&(-emitter.spawn_half_extents.x..emitter.spawn_half_extents.x)),
-                    sample(&(-emitter.spawn_half_extents.y..emitter.spawn_half_extents.y)),
+                    sample(&(-self.spawn_half_extents.x..self.spawn_half_extents.x)),
+                    sample(&(-self.spawn_half_extents.y..self.spawn_half_extents.y)),
                 );
-            let angle = sample(&(0.0..std::f32::consts::TAU));
-            let speed = sample(&emitter.speed);
+            let velocity = Vec2::from_angle(sample(&(0.0..std::f32::consts::TAU))) * sample(&self.speed);
             let color = Color::srgba(
-                sample(&emitter.red),
-                sample(&emitter.green),
-                sample(&emitter.blue),
-                emitter.alpha,
-            );
+                sample(&self.red),
+                sample(&self.green),
+                sample(&self.blue),
+                self.alpha,
+            )
+            .to_linear();
 
-            commands.spawn((
-                Particle,
-                EmittedBy(emitter_entity),
-                Velocity(Vec2::from_angle(angle) * speed),
-                Mass(radius * emitter.mass_per_radius),
-                Transform::from_translation(position.extend(0.0))
-                    .with_scale(Vec3::splat(radius)),
-                Mesh2d(particle_mesh.0.clone()),
-                MeshMaterial2d(materials.add(ColorMaterial {
-                    color,
-                    alpha_mode: AlphaMode2d::Blend,
-                    ..default()
-                })),
-            ));
-        }
+            GpuParticle {
+                position: position.into(),
+                velocity: velocity.into(),
+                color: color.to_f32_array(),
+                mass: radius * self.mass_per_radius,
+                radius,
+                _padding: [0.0; 2],
+            }
+        })
     }
 }
 

@@ -1,70 +1,30 @@
-use bevy::prelude::*;
+use bevy::{prelude::*, render::extract_resource::ExtractResource, render::storage::ShaderBuffer};
+use bytemuck::{Pod, Zeroable};
 
-/// Per-particle state and the system ordering every particle layer plugs into.
-pub struct ParticlePlugin;
-
-impl Plugin for ParticlePlugin {
-    fn build(&self, app: &mut App) {
-        app.configure_sets(
-            Update,
-            (
-                ParticleSystems::Spawn,
-                ParticleSystems::Forces,
-                ParticleSystems::Integrate,
-            )
-                .chain(),
-        )
-        .add_systems(Startup, create_particle_mesh)
-        .add_systems(Update, integrate.in_set(ParticleSystems::Integrate));
-    }
+/// One particle as stored in the GPU particle buffer.
+///
+/// Must match `struct Particle` in every shader under `assets/shaders/`.
+/// Layout (std430, 48 bytes): position @0, velocity @8, color @16, mass @32, radius @36,
+/// then 8 bytes of padding that phase 2 will use for age/lifetime.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuParticle {
+    pub position: [f32; 2],
+    pub velocity: [f32; 2],
+    /// Linear RGBA (values above 1.0 are HDR and drive bloom).
+    pub color: [f32; 4],
+    pub mass: f32,
+    pub radius: f32,
+    pub _padding: [f32; 2],
 }
 
-/// Frame order: emitters spawn, then layers add forces to velocity, then
-/// velocity moves position (semi-implicit Euler).
-#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ParticleSystems {
-    Spawn,
-    Forces,
-    Integrate,
-}
+const _: () = assert!(size_of::<GpuParticle>() == 48);
 
-#[derive(Component, Debug, Default)]
-#[require(Velocity, Mass, Transform)]
-pub struct Particle;
-
-#[derive(Component, Debug, Default, Clone, Copy, Deref, DerefMut)]
-pub struct Velocity(pub Vec2);
-
-#[derive(Component, Debug, Clone, Copy, Deref, DerefMut)]
-pub struct Mass(pub f32);
-
-impl Default for Mass {
-    fn default() -> Self {
-        Self(1.0)
-    }
-}
-
-/// The emitter that owns a particle. Despawning the emitter despawns its particles.
-#[derive(Component, Debug)]
-#[relationship(relationship_target = EmittedParticles)]
-pub struct EmittedBy(pub Entity);
-
-/// All particles owned by an emitter (maintained automatically by Bevy).
-#[derive(Component, Debug, Default)]
-#[relationship_target(relationship = EmittedBy, linked_spawn)]
-pub struct EmittedParticles(Vec<Entity>);
-
-/// Shared unit-circle mesh; particle size is applied through `Transform::scale`.
-#[derive(Resource)]
-pub struct ParticleMesh(pub Handle<Mesh>);
-
-fn create_particle_mesh(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
-    commands.insert_resource(ParticleMesh(meshes.add(Circle::new(1.0))));
-}
-
-fn integrate(time: Res<Time>, mut particles: Query<(&mut Transform, &Velocity), With<Particle>>) {
-    let dt = time.delta_secs();
-    for (mut transform, velocity) in &mut particles {
-        transform.translation += velocity.extend(0.0) * dt;
-    }
+/// The GPU particle buffer and how many particles it holds.
+/// Created once at startup from the emitters' bursts (see `space.rs`).
+#[derive(Resource, Clone, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
+pub struct ParticleBuffer {
+    pub buffer: Handle<ShaderBuffer>,
+    pub count: u32,
 }

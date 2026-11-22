@@ -447,6 +447,7 @@ name = "bevy-particle"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bytemuck",
  "rand",
  "ron",
  "serde",
