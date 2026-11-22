@@ -1,11 +1,14 @@
 use bevy::{prelude::*, render::extract_resource::ExtractResource, render::storage::ShaderBuffer};
 use bytemuck::{Pod, Zeroable};
 
-/// One particle as stored in the GPU particle buffer.
+/// One particle slot in the GPU particle buffer.
 ///
 /// Must match `struct Particle` in every shader under `assets/shaders/`.
-/// Layout (std430, 48 bytes): position @0, velocity @8, color @16, mass @32, radius @36,
-/// then 8 bytes of padding that phase 2 will use for age/lifetime.
+/// Layout (std430, 64 bytes): position @0, velocity @8, color @16, mass @32, radius @36,
+/// age @40, lifetime @44, emitter @48, then 12 bytes of padding.
+///
+/// A slot is alive when `lifetime < 0` (immortal) or `age < lifetime`.
+/// An all-zero slot is dead, so a zero-initialized buffer starts empty.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct GpuParticle {
@@ -15,16 +18,26 @@ pub struct GpuParticle {
     pub color: [f32; 4],
     pub mass: f32,
     pub radius: f32,
-    pub _padding: [f32; 2],
+    /// Seconds since spawn.
+    pub age: f32,
+    /// Seconds the particle lives; negative means it never dies.
+    pub lifetime: f32,
+    /// Index of the owning emitter in the GPU emitter array (see `EmitterRegistry`).
+    pub emitter: u32,
+    pub _padding: [u32; 3],
 }
 
-const _: () = assert!(size_of::<GpuParticle>() == 48);
+const _: () = assert!(size_of::<GpuParticle>() == 64);
 
-/// The GPU particle buffer and how many particles it holds.
-/// Created once at startup from the emitters' bursts (see `space.rs`).
+/// The GPU buffers backing a particle space.
+///
+/// - `particles`: `capacity` slots of [`GpuParticle`], zero-initialized (all dead).
+/// - `free_list`: `[count: i32, indices: [u32; capacity]]`, a stack of dead slot indices.
+///   Starts full. The integrate pass pushes slots as particles die; the spawn pass pops them.
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(bevy::render::RenderApp)]
-pub struct ParticleBuffer {
-    pub buffer: Handle<ShaderBuffer>,
-    pub count: u32,
+pub struct ParticleBuffers {
+    pub particles: Handle<ShaderBuffer>,
+    pub free_list: Handle<ShaderBuffer>,
+    pub capacity: u32,
 }

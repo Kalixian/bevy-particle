@@ -6,7 +6,7 @@ use bevy::{
     render::{
         render_asset::RenderAssets,
         render_resource::{
-            binding_types::{storage_buffer_sized, uniform_buffer},
+            binding_types::{storage_buffer_read_only, storage_buffer_sized, uniform_buffer},
             *,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
@@ -15,119 +15,177 @@ use bevy::{
     },
 };
 
-use crate::{particle::ParticleBuffer, space::SimParams};
+use super::GpuSimReady;
+use crate::{
+    emitter::{EmitterUpload, GpuEmitter},
+    modifier::{GpuModifier, ModifierUpload},
+    particle::ParticleBuffers,
+    space::SimParams,
+};
 
-const SHADER_ASSET_PATH: &str = "shaders/particle_integrate.wgsl";
+const SHADER_ASSET_PATH: &str = "shaders/particle_sim.wgsl";
 /// Must match `@workgroup_size` in the shader.
 const WORKGROUP_SIZE: u32 = 256;
 
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
-        .init_resource::<SimParamsBuffer>()
-        .add_systems(RenderStartup, init_pipeline)
+        .init_resource::<SimBuffers>()
+        .add_systems(RenderStartup, init_pipelines)
         .add_systems(
             Render,
             (
-                write_sim_params.in_set(RenderSystems::PrepareResources),
+                write_sim_buffers.in_set(RenderSystems::PrepareResources),
                 prepare_bind_group.in_set(RenderSystems::PrepareBindGroups),
             ),
         )
-        // Simulate before any camera renders, so every view draws this frame's positions.
-        .add_systems(RenderGraph, dispatch_integrate.before(camera_driver));
+        // Simulate before any camera renders, so every view draws this frame's state.
+        .add_systems(RenderGraph, dispatch_sim.before(camera_driver));
 }
 
 #[derive(Resource)]
-struct IntegratePipeline {
+struct SimPipelines {
     layout: BindGroupLayoutDescriptor,
-    pipeline: CachedComputePipelineId,
+    integrate: CachedComputePipelineId,
+    spawn: CachedComputePipelineId,
 }
 
+/// Small per-frame buffers written from the CPU.
 #[derive(Resource, Default)]
-struct SimParamsBuffer(UniformBuffer<SimParams>);
+struct SimBuffers {
+    params: UniformBuffer<SimParams>,
+    emitters: StorageBuffer<Vec<GpuEmitter>>,
+    modifiers: StorageBuffer<Vec<GpuModifier>>,
+}
 
 #[derive(Resource)]
-struct IntegrateBindGroup(BindGroup);
+struct SimBindGroup(BindGroup);
 
-fn init_pipeline(
+fn init_pipelines(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
     let layout = BindGroupLayoutDescriptor::new(
-        "particle_integrate_layout",
+        "particle_sim_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 uniform_buffer::<SimParams>(false),
+                // particles
                 storage_buffer_sized(false, None),
+                // free list
+                storage_buffer_sized(false, None),
+                storage_buffer_read_only::<Vec<GpuEmitter>>(false),
+                storage_buffer_read_only::<Vec<GpuModifier>>(false),
             ),
         ),
     );
-    let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("particle_integrate".into()),
-        layout: vec![layout.clone()],
-        shader: asset_server.load(SHADER_ASSET_PATH),
-        entry_point: Some(Cow::from("integrate")),
-        ..default()
+    let shader: Handle<Shader> = asset_server.load(SHADER_ASSET_PATH);
+    let queue = |entry_point: &'static str| {
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some(format!("particle_{entry_point}").into()),
+            layout: vec![layout.clone()],
+            shader: shader.clone(),
+            entry_point: Some(Cow::from(entry_point)),
+            ..default()
+        })
+    };
+    let integrate = queue("integrate");
+    let spawn = queue("spawn");
+    commands.insert_resource(SimPipelines {
+        layout,
+        integrate,
+        spawn,
     });
-    commands.insert_resource(IntegratePipeline { layout, pipeline });
 }
 
-fn write_sim_params(
+fn write_sim_buffers(
     params: Res<SimParams>,
-    mut buffer: ResMut<SimParamsBuffer>,
+    emitters: Res<EmitterUpload>,
+    modifiers: Res<ModifierUpload>,
+    mut buffers: ResMut<SimBuffers>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
 ) {
-    buffer.0.set(*params);
-    buffer.0.write_buffer(&device, &queue);
+    buffers.params.set(*params);
+    buffers.params.write_buffer(&device, &queue);
+    buffers.emitters.set(emitters.emitters.clone());
+    buffers.emitters.write_buffer(&device, &queue);
+    buffers.modifiers.set(modifiers.gpu_data());
+    buffers.modifiers.write_buffer(&device, &queue);
 }
 
 fn prepare_bind_group(
     mut commands: Commands,
-    pipeline: Res<IntegratePipeline>,
+    pipelines: Res<SimPipelines>,
     pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
-    params: Res<SimParamsBuffer>,
-    particle_buffer: Option<Res<ParticleBuffer>>,
+    sim_buffers: Res<SimBuffers>,
+    particle_buffers: Option<Res<ParticleBuffers>>,
     gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
 ) {
-    let Some(particles) = particle_buffer.and_then(|b| gpu_buffers.get(&b.buffer)) else {
-        commands.remove_resource::<IntegrateBindGroup>();
+    let gpu = particle_buffers.and_then(|b| {
+        Some((gpu_buffers.get(&b.particles)?, gpu_buffers.get(&b.free_list)?))
+    });
+    let (Some((particles, free_list)), Some(emitters), Some(modifiers)) = (
+        gpu,
+        sim_buffers.emitters.binding(),
+        sim_buffers.modifiers.binding(),
+    ) else {
+        commands.remove_resource::<SimBindGroup>();
         return;
     };
     let bind_group = device.create_bind_group(
-        "particle_integrate_bind_group",
-        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((&params.0, particles.buffer.as_entire_binding())),
+        "particle_sim_bind_group",
+        &pipeline_cache.get_bind_group_layout(&pipelines.layout),
+        &BindGroupEntries::sequential((
+            &sim_buffers.params,
+            particles.buffer.as_entire_binding(),
+            free_list.buffer.as_entire_binding(),
+            emitters,
+            modifiers,
+        )),
     );
-    commands.insert_resource(IntegrateBindGroup(bind_group));
+    commands.insert_resource(SimBindGroup(bind_group));
 }
 
-fn dispatch_integrate(
+fn dispatch_sim(
     mut ctx: RenderContext,
-    pipeline: Res<IntegratePipeline>,
+    pipelines: Res<SimPipelines>,
     pipeline_cache: Res<PipelineCache>,
-    bind_group: Option<Res<IntegrateBindGroup>>,
+    bind_group: Option<Res<SimBindGroup>>,
     params: Res<SimParams>,
+    ready: Res<GpuSimReady>,
 ) {
-    let (Some(bind_group), Some(compute_pipeline)) = (
+    let (Some(bind_group), Some(integrate), Some(spawn)) = (
         bind_group,
-        pipeline_cache.get_compute_pipeline(pipeline.pipeline),
+        pipeline_cache.get_compute_pipeline(pipelines.integrate),
+        pipeline_cache.get_compute_pipeline(pipelines.spawn),
     ) else {
         return;
     };
-    if params.count == 0 {
+    if params.capacity == 0 {
         return;
     }
 
     let mut pass = ctx
         .command_encoder()
         .begin_compute_pass(&ComputePassDescriptor {
-            label: Some("particle_integrate"),
+            label: Some("particle_sim"),
             ..default()
         });
-    pass.set_pipeline(compute_pipeline);
     pass.set_bind_group(0, &bind_group.0, &[]);
-    pass.dispatch_workgroups(params.count.div_ceil(WORKGROUP_SIZE), 1, 1);
+
+    // Integrate first: it ages and kills particles, returning their slots to the free list,
+    // so the spawn pass can reuse them in the same frame. Each dispatch is its own
+    // synchronization scope, so spawn sees integrate's writes.
+    pass.set_pipeline(integrate);
+    pass.dispatch_workgroups(params.capacity.div_ceil(WORKGROUP_SIZE), 1, 1);
+
+    if params.spawn_total > 0 {
+        pass.set_pipeline(spawn);
+        pass.dispatch_workgroups(params.spawn_total.div_ceil(WORKGROUP_SIZE), 1, 1);
+    }
+
+    ready.set();
 }

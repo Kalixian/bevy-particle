@@ -1,13 +1,16 @@
 // Draws one quad per particle (6 vertices, one instance each) straight from the particle
 // buffer, then cuts it to a disk in the fragment shader.
 
-// Must match `GpuParticle` in src/particle.rs (48-byte stride).
+// Must match `GpuParticle` in src/particle.rs (64-byte stride).
 struct Particle {
     position: vec2<f32>,
     velocity: vec2<f32>,
     color: vec4<f32>,
     mass: f32,
     radius: f32,
+    age: f32,
+    lifetime: f32,
+    emitter: u32,
 }
 
 // Only the first field of Bevy's `View` uniform; the rest of the binding is ignored.
@@ -36,9 +39,15 @@ fn vertex(
     );
     let corner = corners[vertex_index];
     let p = particles[instance_index];
-    let world = p.position + corner * p.radius;
 
     var out: VertexOutput;
+    // Every slot is drawn; dead ones collapse to a degenerate point and are clipped.
+    if !(p.lifetime < 0.0 || p.age < p.lifetime) {
+        out.clip_position = vec4(0.0);
+        return out;
+    }
+
+    let world = p.position + corner * p.radius;
     out.clip_position = view.clip_from_world * vec4(world, 0.0, 1.0);
     out.local = corner;
     out.color = p.color;

@@ -5,103 +5,112 @@ use bevy::{
 };
 
 use crate::{
-    emitter::ParticleEmitter,
-    particle::{GpuParticle, ParticleBuffer},
+    emitter::{EmitterSystems, EmitterUpload},
+    modifier::{ModifierSystems, ModifierUpload, Modifiers},
+    particle::{GpuParticle, ParticleBuffers},
 };
 
 /// The outer layer: settings and forces that apply to every particle in the space.
+/// Space-wide behavior comes from a [`Modifiers`] component on the space entity.
 pub struct SpacePlugin;
 
 impl Plugin for SpacePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SimParams>()
-            .add_systems(PostStartup, build_particle_buffer)
-            .add_systems(Update, update_sim_params);
+        app.init_resource::<SimParams>().add_systems(
+            PostUpdate,
+            (
+                create_space_buffers,
+                update_sim_params
+                    .after(EmitterSystems)
+                    .after(ModifierSystems::Clear),
+            )
+                .after(TransformSystems::Propagate),
+        );
     }
 }
 
-/// A particle space. Emitters belong to a space as its children (`ChildOf`).
+/// A particle space. Emitters belong to a space as their parent (`ChildOf`).
 ///
-/// Phase 1 supports one space; the GPU buffers are global resources for now.
+/// Only one space is supported for now: the GPU buffers are global resources.
 #[derive(Component, Debug, Clone)]
 #[require(Transform)]
 pub struct ParticleSpace {
-    pub center_pull: Option<CenterPull>,
+    /// Maximum number of live particles. Fixed once the space is created.
+    pub capacity: u32,
 }
 
-/// Inverse-square pull toward the space's origin.
-/// Placeholder until the modifier system (phase 3) and real gravity (phases 4–5).
-#[derive(Debug, Clone, Copy)]
-pub struct CenterPull {
-    /// Acceleration = strength / distance².
-    pub strength: f32,
-    /// Upper limit on the acceleration, so particles near the center don't blow up.
-    pub max_accel: f32,
-}
-
-/// Per-frame simulation uniforms. Must match `struct SimParams` in `particle_integrate.wgsl`.
+/// Per-frame simulation uniforms. Must match `struct SimParams` in `particle_sim.wgsl`.
 #[derive(Resource, Clone, Copy, Default, ExtractResource, ShaderType)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct SimParams {
-    pub center: Vec2,
-    pub pull_strength: f32,
-    pub pull_max_accel: f32,
     pub dt: f32,
-    pub count: u32,
+    /// Number of particle slots (integrate-pass threads).
+    pub capacity: u32,
+    /// Number of spawn requests this frame (spawn-pass threads).
+    pub spawn_total: u32,
+    pub emitter_count: u32,
+    /// Changes every frame; seeds the GPU random numbers.
+    pub frame: u32,
+    /// The space's slice of the modifier array.
+    pub modifier_offset: u32,
+    pub modifier_count: u32,
 }
 
-/// Generates every emitter's burst on the CPU and uploads it as one GPU buffer.
-fn build_particle_buffer(
+fn create_space_buffers(
     mut commands: Commands,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
-    spaces: Query<(Entity, &Transform, &Children), With<ParticleSpace>>,
-    emitters: Query<(&ParticleEmitter, &Transform)>,
+    spaces: Query<(Entity, &ParticleSpace), Added<ParticleSpace>>,
+    existing: Option<Res<ParticleBuffers>>,
 ) {
-    let mut spaces = spaces.iter();
-    let Some((space, space_transform, children)) = spaces.next() else {
-        warn!("No ParticleSpace found; nothing to simulate");
+    for (entity, space) in &spaces {
+        if existing.is_some() {
+            warn!("Only one ParticleSpace is supported; ignoring {entity}");
+            continue;
+        }
+        let capacity = space.capacity;
+        info!("Allocating {capacity} particle slots");
+
+        // Zero-initialized by wgpu, which means every slot starts dead.
+        let particles = ShaderBuffer::with_size(
+            capacity as u64 * size_of::<GpuParticle>() as u64,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        // [count, then indices capacity-1 .. 0] so the first pops hand out low indices.
+        let free_list: Vec<u32> = std::iter::once(capacity).chain((0..capacity).rev()).collect();
+        let free_list = ShaderBuffer::new(free_list, RenderAssetUsages::RENDER_WORLD);
+
+        commands.insert_resource(ParticleBuffers {
+            particles: buffers.add(particles),
+            free_list: buffers.add(free_list),
+            capacity,
+        });
         return;
-    };
-    if spaces.next().is_some() {
-        warn!("Only one ParticleSpace is supported in phase 1; using {space}");
     }
-
-    let particles: Vec<GpuParticle> = emitters
-        .iter_many(children)
-        // Children that aren't emitters come back as Err; skip them.
-        .flatten()
-        // GlobalTransform isn't propagated yet during PostStartup, so compose by hand.
-        .flat_map(|(emitter, transform)| {
-            let origin = space_transform.mul_transform(*transform).translation.truncate();
-            emitter.burst(origin)
-        })
-        .collect();
-    let count = particles.len() as u32;
-    info!("Uploading {count} particles to the GPU");
-
-    // RENDER_WORLD only: the CPU copy is dropped after upload, and the GPU owns the state.
-    let buffer = buffers.add(ShaderBuffer::new(particles, RenderAssetUsages::RENDER_WORLD));
-    commands.insert_resource(ParticleBuffer { buffer, count });
 }
 
 fn update_sim_params(
     time: Res<Time>,
-    particle_buffer: Option<Res<ParticleBuffer>>,
-    space: Query<(&ParticleSpace, &GlobalTransform)>,
+    particle_buffers: Option<Res<ParticleBuffers>>,
+    emitters: Res<EmitterUpload>,
+    mut modifier_upload: ResMut<ModifierUpload>,
+    space: Query<(&GlobalTransform, Option<&Modifiers>), With<ParticleSpace>>,
     mut params: ResMut<SimParams>,
 ) {
-    let Some((space, transform)) = space.iter().next() else {
+    let (Some((transform, modifiers)), Some(buffers)) = (space.iter().next(), particle_buffers)
+    else {
+        *params = SimParams::default();
         return;
     };
-    let pull = space.center_pull.unwrap_or(CenterPull {
-        strength: 0.0,
-        max_accel: 0.0,
-    });
+    let (modifier_offset, modifier_count) =
+        modifier_upload.push(modifiers, transform.translation().truncate());
+
     *params = SimParams {
-        center: transform.translation().truncate(),
-        pull_strength: pull.strength,
-        pull_max_accel: pull.max_accel,
         dt: time.delta_secs(),
-        count: particle_buffer.map_or(0, |b| b.count),
+        capacity: buffers.capacity,
+        spawn_total: emitters.spawn_total,
+        emitter_count: emitters.emitters.len() as u32,
+        frame: params.frame.wrapping_add(1),
+        modifier_offset,
+        modifier_count,
     };
 }

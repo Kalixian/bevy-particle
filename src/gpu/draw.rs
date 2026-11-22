@@ -14,7 +14,7 @@ use bevy::{
     },
 };
 
-use crate::particle::ParticleBuffer;
+use crate::particle::ParticleBuffers;
 
 const SHADER_ASSET_PATH: &str = "shaders/particle_draw.wgsl";
 
@@ -131,12 +131,12 @@ fn prepare_bind_group(
     pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     view_uniforms: Res<ViewUniforms>,
-    particle_buffer: Option<Res<ParticleBuffer>>,
+    particle_buffers: Option<Res<ParticleBuffers>>,
     gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
 ) {
     let (Some(view_binding), Some(particles)) = (
         view_uniforms.uniforms.binding(),
-        particle_buffer.and_then(|b| gpu_buffers.get(&b.buffer)),
+        particle_buffers.and_then(|b| gpu_buffers.get(&b.particles)),
     ) else {
         commands.remove_resource::<DrawBindGroup>();
         return;
@@ -153,13 +153,13 @@ fn draw_particles(
     view: ViewQuery<(&ViewTarget, &ViewUniformOffset, &ViewDrawPipeline)>,
     pipeline_cache: Res<PipelineCache>,
     bind_group: Option<Res<DrawBindGroup>>,
-    particle_buffer: Option<Res<ParticleBuffer>>,
+    particle_buffers: Option<Res<ParticleBuffers>>,
     mut ctx: RenderContext,
 ) {
     let (target, view_offset, view_pipeline) = view.into_inner();
-    let (Some(bind_group), Some(particle_buffer), Some(render_pipeline)) = (
+    let (Some(bind_group), Some(particle_buffers), Some(render_pipeline)) = (
         bind_group,
-        particle_buffer,
+        particle_buffers,
         pipeline_cache.get_render_pipeline(view_pipeline.0),
     ) else {
         return;
@@ -177,5 +177,5 @@ fn draw_particles(
         });
     pass.set_pipeline(render_pipeline);
     pass.set_bind_group(0, &bind_group.0, &[view_offset.offset]);
-    pass.draw(0..6, 0..particle_buffer.count);
+    pass.draw(0..6, 0..particle_buffers.capacity);
 }
