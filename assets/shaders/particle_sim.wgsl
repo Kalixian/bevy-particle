@@ -23,9 +23,16 @@ struct SimParams {
     // The space's slice of `modifiers`.
     modifier_offset: u32,
     modifier_count: u32,
+    gravity_enabled: u32,
+    gravity_strength: f32,
+    gravity_softening_sq: f32,
+    gravity_method: u32,
+    gravity_max_bodies: u32,
+    gravity_theta_sq: f32,
 }
 
-// Must match `GpuEmitter` in src/emitter.rs. vec2 fields are (min, max) ranges.
+// Must match `GpuEmitter` in src/emitter.rs. vec2 fields are (start, end) ranges, each
+// shaped by its `*_curve` (see `sample_spread`).
 struct Emitter {
     position: vec2<f32>,
     spawn_half_extents: vec2<f32>,
@@ -33,14 +40,32 @@ struct Emitter {
     angle: vec2<f32>,
     radius: vec2<f32>,
     lifetime: vec2<f32>,
-    color_min: vec4<f32>,
-    color_max: vec4<f32>,
+    red: vec2<f32>,
+    green: vec2<f32>,
+    blue: vec2<f32>,
+    alpha: f32,
     mass_per_radius: f32,
     spawn_offset: u32,
     spawn_count: u32,
     enabled: u32,
     modifier_offset: u32,
     modifier_count: u32,
+    gravity: u32,
+    speed_curve: u32,
+    angle_curve: u32,
+    radius_curve: u32,
+    lifetime_curve: u32,
+    red_curve: u32,
+    green_curve: u32,
+    blue_curve: u32,
+}
+
+// A `Spread` shape as a lookup table: t at u = i / (CURVE_SAMPLES - 1), four per vec4.
+// Must match `GpuCurve` in src/spread.rs.
+const CURVE_SAMPLES: u32 = 32u;
+const NO_CURVE: u32 = 0xFFFFFFFFu;
+struct Curve {
+    samples: array<vec4<f32>, 8>,
 }
 
 // Must match `GpuModifier` in src/modifier.rs; `a`/`b` are decoded per kind below.
@@ -62,6 +87,11 @@ struct FreeList {
 @group(0) @binding(2) var<storage, read_write> free_list: FreeList;
 @group(0) @binding(3) var<storage, read> emitters: array<Emitter>;
 @group(0) @binding(4) var<storage, read> modifiers: array<Modifier>;
+// Gravity (see src/gpu/gravity.rs). bodies[k] = (x, y, mass, bitcast<f32>(slot)).
+@group(0) @binding(5) var<storage, read_write> bodies: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> body_count: atomic<u32>;
+@group(0) @binding(7) var<storage, read> accel: array<vec2<f32>>;
+@group(0) @binding(8) var<storage, read> curves: array<Curve>;
 
 const MOD_ACCELERATION: u32 = 0u;
 const MOD_POINT_ATTRACTOR: u32 = 1u;
@@ -82,6 +112,26 @@ fn kill(i: u32) {
     free_list.indices[top] = i;
 }
 
+// Packs every live, gravity-participating particle into `bodies`.
+// `body_count` is reset to 0 by the CPU before this pass.
+@compute @workgroup_size(256)
+fn compact(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= params.capacity {
+        return;
+    }
+    let p = particles[i];
+    if !is_alive(p) || emitters[p.emitter].gravity == 0u {
+        return;
+    }
+    let k = atomicAdd(&body_count, 1u);
+    // Bodies past the limit are left out of gravity this frame (the gravity passes clamp
+    // the count to the same limit).
+    if k < params.gravity_max_bodies {
+        bodies[k] = vec4(p.position, p.mass, bitcast<f32>(i));
+    }
+}
+
 @compute @workgroup_size(256)
 fn integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
@@ -99,6 +149,11 @@ fn integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     if !is_alive(p) || emitter.enabled == 0u {
         kill(i);
         return;
+    }
+
+    // Gravity was computed this frame for every participant (by `compact` + `gravity`).
+    if params.gravity_enabled != 0u && emitter.gravity != 0u {
+        p.velocity += accel[i] * params.dt;
     }
 
     // Space modifiers first, then the particle's own emitter's.
@@ -217,19 +272,23 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     var rng = pcg_hash(request ^ pcg_hash(params.frame));
 
     let offset = (vec2(rand(&rng), rand(&rng)) * 2.0 - 1.0) * em.spawn_half_extents;
-    let direction = sample(em.angle, &rng);
-    let speed = sample(em.speed, &rng);
-    let radius = sample(em.radius, &rng);
+    let direction = sample_spread(em.angle, em.angle_curve, &rng);
+    let speed = sample_spread(em.speed, em.speed_curve, &rng);
+    let radius = sample_spread(em.radius, em.radius_curve, &rng);
     var lifetime = -1.0;
     if em.lifetime.x >= 0.0 {
-        lifetime = sample(em.lifetime, &rng);
+        lifetime = sample_spread(em.lifetime, em.lifetime_curve, &rng);
     }
-    let srgb = mix(em.color_min, em.color_max, vec4(rand(&rng), rand(&rng), rand(&rng), rand(&rng)));
+    let srgb = vec3(
+        sample_spread(em.red, em.red_curve, &rng),
+        sample_spread(em.green, em.green_curve, &rng),
+        sample_spread(em.blue, em.blue_curve, &rng),
+    );
 
     var p: Particle;
     p.position = em.position + offset;
     p.velocity = vec2(cos(direction), sin(direction)) * speed;
-    p.color = vec4(srgb_to_linear(srgb.rgb), srgb.a);
+    p.color = vec4(srgb_to_linear(srgb), em.alpha);
     p.mass = radius * em.mass_per_radius;
     p.radius = radius;
     p.age = 0.0;
@@ -253,8 +312,23 @@ fn rand(state: ptr<function, u32>) -> f32 {
     return f32(*state >> 8u) / 16777216.0;
 }
 
-fn sample(range: vec2<f32>, state: ptr<function, u32>) -> f32 {
-    return mix(range.x, range.y, rand(state));
+// A random value in `range` (start, end), distributed by `curve` (see src/spread.rs):
+// a uniform u is bent through the curve's lookup table, then mapped into the range.
+fn sample_spread(range: vec2<f32>, curve: u32, state: ptr<function, u32>) -> f32 {
+    return mix(range.x, range.y, shape(curve, rand(state)));
+}
+
+fn shape(curve: u32, u: f32) -> f32 {
+    if curve == NO_CURVE {
+        return u;
+    }
+    let x = u * f32(CURVE_SAMPLES - 1u);
+    let i = min(u32(x), CURVE_SAMPLES - 2u);
+    return mix(curve_sample(curve, i), curve_sample(curve, i + 1u), x - f32(i));
+}
+
+fn curve_sample(curve: u32, i: u32) -> f32 {
+    return curves[curve].samples[i / 4u][i % 4u];
 }
 
 // Same curve Bevy uses for `Color::srgba(..).to_linear()`, including values above 1.0.

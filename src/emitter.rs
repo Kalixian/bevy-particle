@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use bevy::{
     prelude::*,
     render::{extract_resource::ExtractResource, render_resource::ShaderType},
@@ -8,6 +6,7 @@ use bevy::{
 use crate::{
     gpu::GpuSimReady,
     modifier::{ModifierSystems, ModifierUpload, Modifiers},
+    spread::{GpuCurve, Spread, NO_CURVE},
 };
 
 /// The middle layer: emitters decide where, how often, and with what initial values
@@ -47,21 +46,28 @@ pub struct ParticleEmitter {
     /// Continuous spawn rate, in particles per second.
     pub rate: f32,
     /// Lifespan in seconds, sampled per particle. `None` = particles never die.
-    pub lifetime: Option<Range<f32>>,
+    ///
+    /// This and the other `Spread` fields are random ranges with a distribution shape:
+    /// `(1.0..2.0).into()` is uniform; see [`Spread`] and `Shape` for skewed ones.
+    pub lifetime: Option<Spread>,
     /// Particles spawn uniformly inside this rectangle, centered on the emitter.
     pub spawn_half_extents: Vec2,
     /// Initial speed.
-    pub speed: Range<f32>,
+    pub speed: Spread,
     /// Initial direction in radians (0 = +X, counter-clockwise). `0.0..TAU` = any direction.
-    pub angle: Range<f32>,
-    pub radius: Range<f32>,
+    pub angle: Spread,
+    pub radius: Spread,
     /// Mass = radius × this value.
     pub mass_per_radius: f32,
     /// Per-channel sRGB ranges (values above 1.0 are HDR and drive bloom).
-    pub red: Range<f32>,
-    pub green: Range<f32>,
-    pub blue: Range<f32>,
+    pub red: Spread,
+    pub green: Spread,
+    pub blue: Spread,
     pub alpha: f32,
+    /// Whether this emitter's particles take part in the space's `Gravity`
+    /// (attract each other and feel the pull). Brute-force cost grows with the square of
+    /// all participating particles, so turn it on only for modest counts for now.
+    pub gravity: bool,
 }
 
 impl Default for ParticleEmitter {
@@ -69,16 +75,17 @@ impl Default for ParticleEmitter {
         Self {
             burst_count: 0,
             rate: 100.0,
-            lifetime: Some(2.0..4.0),
+            lifetime: Some((2.0..4.0).into()),
             spawn_half_extents: Vec2::ZERO,
-            speed: 10.0..50.0,
-            angle: 0.0..std::f32::consts::TAU,
-            radius: 1.0..2.0,
+            speed: (10.0..50.0).into(),
+            angle: (0.0..std::f32::consts::TAU).into(),
+            radius: (1.0..2.0).into(),
             mass_per_radius: 1.0,
-            red: 1.0..1.0,
-            green: 1.0..1.0,
-            blue: 1.0..1.0,
+            red: (1.0..1.0).into(),
+            green: (1.0..1.0).into(),
+            blue: (1.0..1.0).into(),
             alpha: 1.0,
+            gravity: false,
         }
     }
 }
@@ -94,13 +101,17 @@ pub struct EmitterState {
 /// Maps emitter entities to their index in the GPU emitter array.
 ///
 /// Particles store that index, so it must stay stable while the emitter exists. Slots of
-/// despawned emitters stay inactive (their particles die) and aren't reused yet.
+/// despawned emitters stay inactive (their particles die) and aren't reused, except that
+/// the whole list starts over once every emitter is gone.
 #[derive(Resource, Default)]
 pub struct EmitterRegistry {
     slots: Vec<Option<Entity>>,
 }
 
 /// One emitter as seen by the GPU. Must match `struct Emitter` in `particle_sim.wgsl`.
+///
+/// Each `Vec2` range is (start, end) and has a `*_curve` index into the curve array
+/// (`NO_CURVE` for uniform).
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct GpuEmitter {
     pub position: Vec2,
@@ -108,11 +119,13 @@ pub struct GpuEmitter {
     pub speed: Vec2,
     pub angle: Vec2,
     pub radius: Vec2,
-    /// (min, max); min < 0 means immortal.
+    /// start < 0 means immortal.
     pub lifetime: Vec2,
-    /// sRGB, converted to linear on the GPU after sampling.
-    pub color_min: Vec4,
-    pub color_max: Vec4,
+    /// sRGB channel ranges, converted to linear on the GPU after sampling.
+    pub red: Vec2,
+    pub green: Vec2,
+    pub blue: Vec2,
+    pub alpha: f32,
     pub mass_per_radius: f32,
     /// This emitter's spawn requests are spawn-pass threads
     /// `spawn_offset .. spawn_offset + spawn_count`.
@@ -123,6 +136,15 @@ pub struct GpuEmitter {
     /// This emitter's slice of the modifier array.
     pub modifier_offset: u32,
     pub modifier_count: u32,
+    /// 1 if this emitter's particles take part in gravity.
+    pub gravity: u32,
+    pub speed_curve: u32,
+    pub angle_curve: u32,
+    pub radius_curve: u32,
+    pub lifetime_curve: u32,
+    pub red_curve: u32,
+    pub green_curve: u32,
+    pub blue_curve: u32,
 }
 
 /// This frame's emitter array and spawn requests, sent to the render world.
@@ -132,8 +154,22 @@ pub struct EmitterUpload {
     /// Indexed by registry slot. Never empty (padded with an inactive emitter),
     /// because a zero-sized storage buffer can't be bound.
     pub emitters: Vec<GpuEmitter>,
+    /// Lookup tables for the emitters' non-uniform `Spread`s.
+    curves: Vec<GpuCurve>,
     /// Sum of all `spawn_count`s: the number of spawn-pass threads.
     pub spawn_total: u32,
+}
+
+impl EmitterUpload {
+    /// The curve array to upload. Never empty, because a zero-sized storage buffer can't be
+    /// bound.
+    pub fn curves_gpu_data(&self) -> Vec<GpuCurve> {
+        if self.curves.is_empty() {
+            vec![GpuCurve::default()]
+        } else {
+            self.curves.clone()
+        }
+    }
 }
 
 fn register_emitters(
@@ -145,6 +181,10 @@ fn register_emitters(
         if let Some(slot) = registry.slots.iter_mut().find(|s| **s == Some(entity)) {
             *slot = None;
         }
+    }
+    // With every emitter gone (e.g. the space was reset), start numbering from 0 again.
+    if registry.slots.iter().all(Option::is_none) {
+        registry.slots.clear();
     }
     for entity in &added {
         registry.slots.push(Some(entity));
@@ -171,6 +211,7 @@ fn prepare_emitter_upload(
     let mut spawn_total = 0u32;
 
     upload.emitters.clear();
+    upload.curves.clear();
     for slot in &registry.slots {
         let Some((emitter, mut state, transform, modifiers)) =
             slot.and_then(|e| emitters.get_mut(e).ok())
@@ -190,21 +231,43 @@ fn prepare_emitter_upload(
         let position = transform.translation().truncate();
         let (modifier_offset, modifier_count) = modifier_upload.push(modifiers, position);
 
+        let curves = &mut upload.curves;
+        let (speed, speed_curve) = emitter.speed.to_gpu(curves);
+        let (angle, angle_curve) = emitter.angle.to_gpu(curves);
+        let (radius, radius_curve) = emitter.radius.to_gpu(curves);
+        let (lifetime, lifetime_curve) = match &emitter.lifetime {
+            Some(lifetime) => lifetime.to_gpu(curves),
+            None => (Vec2::splat(-1.0), NO_CURVE),
+        };
+        let (red, red_curve) = emitter.red.to_gpu(curves);
+        let (green, green_curve) = emitter.green.to_gpu(curves);
+        let (blue, blue_curve) = emitter.blue.to_gpu(curves);
+
         upload.emitters.push(GpuEmitter {
             position,
             spawn_half_extents: emitter.spawn_half_extents,
-            speed: range_vec(&emitter.speed),
-            angle: range_vec(&emitter.angle),
-            radius: range_vec(&emitter.radius),
-            lifetime: emitter.lifetime.as_ref().map_or(Vec2::splat(-1.0), range_vec),
-            color_min: Vec4::new(emitter.red.start, emitter.green.start, emitter.blue.start, emitter.alpha),
-            color_max: Vec4::new(emitter.red.end, emitter.green.end, emitter.blue.end, emitter.alpha),
+            speed,
+            angle,
+            radius,
+            lifetime,
+            red,
+            green,
+            blue,
+            alpha: emitter.alpha,
             mass_per_radius: emitter.mass_per_radius,
             spawn_offset: spawn_total,
             spawn_count,
             enabled: 1,
             modifier_offset,
             modifier_count,
+            gravity: emitter.gravity as u32,
+            speed_curve,
+            angle_curve,
+            radius_curve,
+            lifetime_curve,
+            red_curve,
+            green_curve,
+            blue_curve,
         });
         spawn_total += spawn_count;
     }
@@ -213,8 +276,4 @@ fn prepare_emitter_upload(
         upload.emitters.push(GpuEmitter::default());
     }
     upload.spawn_total = spawn_total;
-}
-
-fn range_vec(range: &Range<f32>) -> Vec2 {
-    Vec2::new(range.start, range.end)
 }

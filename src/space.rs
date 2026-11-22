@@ -6,12 +6,15 @@ use bevy::{
 
 use crate::{
     emitter::{EmitterSystems, EmitterUpload},
+    gpu::GpuSimReady,
+    gravity::{Gravity, MAX_GRAVITY_BODIES},
     modifier::{ModifierSystems, ModifierUpload, Modifiers},
     particle::{GpuParticle, ParticleBuffers},
 };
 
 /// The outer layer: settings and forces that apply to every particle in the space.
-/// Space-wide behavior comes from a [`Modifiers`] component on the space entity.
+/// Space-wide behavior comes from a [`Modifiers`] component on the space entity, and
+/// particle-to-particle attraction from a [`Gravity`] component.
 pub struct SpacePlugin;
 
 impl Plugin for SpacePlugin {
@@ -19,8 +22,10 @@ impl Plugin for SpacePlugin {
         app.init_resource::<SimParams>().add_systems(
             PostUpdate,
             (
-                create_space_buffers,
+                // Before the emitters, so a replaced space holds this frame's spawns.
+                sync_space_buffers.before(EmitterSystems),
                 update_sim_params
+                    .after(sync_space_buffers)
                     .after(EmitterSystems)
                     .after(ModifierSystems::Clear),
             )
@@ -32,6 +37,8 @@ impl Plugin for SpacePlugin {
 /// A particle space. Emitters belong to a space as their parent (`ChildOf`).
 ///
 /// Only one space is supported for now: the GPU buffers are global resources.
+/// Despawning the space (which also despawns its emitters) frees its particles; spawning a
+/// new one starts from an empty buffer.
 #[derive(Component, Debug, Clone)]
 #[require(Transform)]
 pub struct ParticleSpace {
@@ -39,7 +46,8 @@ pub struct ParticleSpace {
     pub capacity: u32,
 }
 
-/// Per-frame simulation uniforms. Must match `struct SimParams` in `particle_sim.wgsl`.
+/// Per-frame simulation uniforms. Must match `struct SimParams` in every shader under
+/// `assets/shaders/` that declares it.
 #[derive(Resource, Clone, Copy, Default, ExtractResource, ShaderType)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct SimParams {
@@ -54,19 +62,43 @@ pub struct SimParams {
     /// The space's slice of the modifier array.
     pub modifier_offset: u32,
     pub modifier_count: u32,
+    /// 1 when the space has [`Gravity`].
+    pub gravity_enabled: u32,
+    pub gravity_strength: f32,
+    pub gravity_softening_sq: f32,
+    /// 0 = brute force, 1 = Barnes-Hut. See [`GravityMethod::as_gpu`].
+    pub gravity_method: u32,
+    /// Most particles that can take part in gravity (sizes the GPU work buffers).
+    pub gravity_max_bodies: u32,
+    /// Barnes-Hut opening angle θ, squared.
+    pub gravity_theta_sq: f32,
 }
 
-fn create_space_buffers(
+/// Drops the GPU buffers of a despawned space and creates buffers for a newly added one.
+fn sync_space_buffers(
     mut commands: Commands,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
-    spaces: Query<(Entity, &ParticleSpace), Added<ParticleSpace>>,
+    added: Query<(Entity, &ParticleSpace), Added<ParticleSpace>>,
+    mut removed: RemovedComponents<ParticleSpace>,
     existing: Option<Res<ParticleBuffers>>,
+    sim_ready: Res<GpuSimReady>,
 ) {
-    for (entity, space) in &spaces {
-        if existing.is_some() {
+    let owner_removed = existing
+        .as_ref()
+        .is_some_and(|b| removed.read().any(|entity| entity == b.space));
+    if owner_removed {
+        commands.remove_resource::<ParticleBuffers>();
+    }
+    let mut has_buffers = existing.is_some() && !owner_removed;
+
+    for (entity, space) in &added {
+        if has_buffers {
             warn!("Only one ParticleSpace is supported; ignoring {entity}");
             continue;
         }
+        has_buffers = true;
+        // The GPU hasn't simulated these buffers yet; emitters wait until it has.
+        sim_ready.reset();
         let capacity = space.capacity;
         info!("Allocating {capacity} particle slots");
 
@@ -78,13 +110,17 @@ fn create_space_buffers(
         // [count, then indices capacity-1 .. 0] so the first pops hand out low indices.
         let free_list: Vec<u32> = std::iter::once(capacity).chain((0..capacity).rev()).collect();
         let free_list = ShaderBuffer::new(free_list, RenderAssetUsages::RENDER_WORLD);
+        // `capacity` × vec2<f32>: gravity acceleration per slot, read by `integrate`.
+        let accel =
+            ShaderBuffer::with_size(capacity as u64 * 8, RenderAssetUsages::RENDER_WORLD);
 
         commands.insert_resource(ParticleBuffers {
+            space: entity,
             particles: buffers.add(particles),
             free_list: buffers.add(free_list),
+            accel: buffers.add(accel),
             capacity,
         });
-        return;
     }
 }
 
@@ -93,10 +129,11 @@ fn update_sim_params(
     particle_buffers: Option<Res<ParticleBuffers>>,
     emitters: Res<EmitterUpload>,
     mut modifier_upload: ResMut<ModifierUpload>,
-    space: Query<(&GlobalTransform, Option<&Modifiers>), With<ParticleSpace>>,
+    space: Query<(&GlobalTransform, Option<&Modifiers>, Option<&Gravity>), With<ParticleSpace>>,
     mut params: ResMut<SimParams>,
 ) {
-    let (Some((transform, modifiers)), Some(buffers)) = (space.iter().next(), particle_buffers)
+    let (Some((transform, modifiers, gravity)), Some(buffers)) =
+        (space.iter().next(), particle_buffers)
     else {
         *params = SimParams::default();
         return;
@@ -112,5 +149,12 @@ fn update_sim_params(
         frame: params.frame.wrapping_add(1),
         modifier_offset,
         modifier_count,
+        gravity_enabled: gravity.is_some() as u32,
+        gravity_strength: gravity.map_or(0.0, |g| g.strength),
+        // Must stay above 0: a body's pull on itself is 0 · (0 + ε²)^(-3/2), NaN at ε = 0.
+        gravity_softening_sq: gravity.map_or(1.0, |g| g.softening.max(1e-3).powi(2)),
+        gravity_method: gravity.map_or(0, |g| g.method.as_gpu()),
+        gravity_max_bodies: buffers.capacity.min(MAX_GRAVITY_BODIES),
+        gravity_theta_sq: gravity.map_or(0.0, |g| g.theta * g.theta),
     };
 }

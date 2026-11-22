@@ -37,7 +37,11 @@ const _: () = assert!(size_of::<GpuParticle>() == 64);
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct ParticleBuffers {
+    /// The `ParticleSpace` entity these belong to; dropped when it's despawned.
+    pub space: Entity,
     pub particles: Handle<ShaderBuffer>,
     pub free_list: Handle<ShaderBuffer>,
+    /// `capacity` × `vec2<f32>`: per-slot gravity acceleration.
+    pub accel: Handle<ShaderBuffer>,
     pub capacity: u32,
 }

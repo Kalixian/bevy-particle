@@ -3,6 +3,10 @@ name = "bevy-particle"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Logs per-pass GPU timings every 2 seconds and turns vsync off: `cargo run --features profile`
+profile = []
+
 [dependencies]
 bevy = "0.20.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }

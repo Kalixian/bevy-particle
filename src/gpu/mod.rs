@@ -3,6 +3,7 @@
 
 mod compute;
 mod draw;
+mod gravity;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -11,7 +12,7 @@ use std::sync::{
 
 use bevy::{
     prelude::*,
-    render::{extract_resource::ExtractResourcePlugin, RenderApp},
+    render::{extract_resource::ExtractResourcePlugin, Extract, ExtractSchedule, RenderApp},
 };
 
 use crate::{
@@ -36,13 +37,29 @@ impl Plugin for ParticleGpuPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.insert_resource(ready);
+        render_app
+            .insert_resource(ready)
+            .add_systems(ExtractSchedule, extract_buffer_removal);
+        gravity::build(render_app);
         compute::build(render_app);
         draw::build(render_app);
     }
 }
 
-/// Set once the simulation compute passes have run for the first time.
+/// `ExtractResourcePlugin` copies resources over but never removes them, so without this a
+/// removed space's buffers would keep being simulated and drawn.
+fn extract_buffer_removal(
+    mut commands: Commands,
+    main_buffers: Extract<Option<Res<ParticleBuffers>>>,
+    render_buffers: Option<Res<ParticleBuffers>>,
+) {
+    if main_buffers.is_none() && render_buffers.is_some() {
+        commands.remove_resource::<ParticleBuffers>();
+    }
+}
+
+/// Set once the simulation compute passes have run with the current space's buffers.
+/// Emitters hold their spawns until then, so nothing is requested before the GPU can act on it.
 #[derive(Resource, Clone, Default)]
 pub struct GpuSimReady(Arc<AtomicBool>);
 
@@ -53,5 +70,10 @@ impl GpuSimReady {
 
     fn set(&self) {
         self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Called when the space's buffers are replaced; the next simulated frame sets it again.
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::Relaxed);
     }
 }
