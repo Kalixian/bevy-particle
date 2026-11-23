@@ -3,6 +3,7 @@ use bevy::{
     prelude::*,
     render::{extract_resource::ExtractResource, render_resource::ShaderType, storage::ShaderBuffer},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     emitter::{EmitterSystems, EmitterUpload},
@@ -39,11 +40,19 @@ impl Plugin for SpacePlugin {
 /// Only one space is supported for now: the GPU buffers are global resources.
 /// Despawning the space (which also despawns its emitters) frees its particles; spawning a
 /// new one starts from an empty buffer.
-#[derive(Component, Debug, Clone)]
-#[require(Transform)]
+#[derive(Component, Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[require(Transform, SpaceState)]
 pub struct ParticleSpace {
     /// Maximum number of live particles. Fixed once the space is created.
     pub capacity: u32,
+}
+
+/// CPU-side bookkeeping for a space.
+#[derive(Component, Debug, Default)]
+pub struct SpaceState {
+    /// Seconds since the space started, for `Track::over_time`.
+    age: f32,
 }
 
 /// Per-frame simulation uniforms. Must match `struct SimParams` in every shader under
@@ -129,8 +138,10 @@ fn update_sim_params(
     particle_buffers: Option<Res<ParticleBuffers>>,
     emitters: Res<EmitterUpload>,
     mut modifier_upload: ResMut<ModifierUpload>,
-    space: Query<
+    sim_ready: Res<GpuSimReady>,
+    mut space: Query<
         (
+            &mut SpaceState,
             &GlobalTransform,
             Option<&Modifiers>,
             Option<&MouseAttractor>,
@@ -140,14 +151,17 @@ fn update_sim_params(
     >,
     mut params: ResMut<SimParams>,
 ) {
-    let (Some((transform, modifiers, mouse, gravity)), Some(buffers)) =
-        (space.iter().next(), particle_buffers)
+    let (Some((mut state, transform, modifiers, mouse, gravity)), Some(buffers)) =
+        (space.iter_mut().next(), particle_buffers)
     else {
         *params = SimParams::default();
         return;
     };
     let (modifier_offset, modifier_count) =
-        modifier_upload.push(modifiers, mouse, transform.translation().truncate());
+        modifier_upload.push(modifiers, mouse, transform.translation().truncate(), state.age);
+    if sim_ready.get() {
+        state.age += time.delta_secs();
+    }
 
     *params = SimParams {
         dt: time.delta_secs(),

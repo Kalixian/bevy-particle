@@ -3,6 +3,9 @@ use bevy::{
     render::{extract_resource::ExtractResource, render_resource::ShaderType},
     window::PrimaryWindow,
 };
+use serde::{Deserialize, Serialize};
+
+use crate::track::{Animated, GpuTrackRecord, ParamEncoder, Rgb};
 
 /// Shared modifier plumbing. Which particles a modifier affects depends on where the
 /// [`Modifiers`] (or [`MouseAttractor`]) component sits:
@@ -29,12 +32,13 @@ impl Plugin for ModifierPlugin {
 /// `ParticleSpace` to pull every particle, or on a `ParticleEmitter` to pull only its own.
 ///
 /// It runs after the owner's [`Modifiers`] list and doesn't change it.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MouseAttractor {
     /// Acceleration = strength / distance², like `PointAttractor`. Negative repels.
-    pub strength: f32,
+    pub strength: Animated<f32>,
     /// Upper limit on the acceleration.
-    pub max_accel: f32,
+    pub max_accel: Animated<f32>,
 }
 
 /// The cursor's world position while the left mouse button is held, otherwise `None`.
@@ -61,92 +65,154 @@ pub enum ModifierSystems {
     Clear,
 }
 
-/// Behaviors applied to particles every frame. Add a variant here and a matching
-/// `case` in `apply_modifier` in `particle_sim.wgsl`.
+/// Behaviors applied to particles every frame. Add a variant here and a matching `case` in
+/// `apply_force` or `apply_appearance` in `particle_sim.wgsl`.
+///
+/// Every parameter is an [`Animated`]: a constant or a keyframe `Track`, via `.into()`.
+///
+/// Color, alpha, size and mass start from the particle's spawn values every frame, so
+/// appearance modifiers combine in order without building up over time.
 ///
 /// Positions (`offset`) are relative to the owning space or emitter, so attractors move
 /// with their owner.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // A toolbox: the demo scene doesn't use every variant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Modifier {
     /// Constant acceleration, e.g. wind or downward gravity.
-    Acceleration(Vec2),
+    Acceleration(Animated<Vec2>),
     /// Inverse-square pull toward a point: `strength / distance²`, capped at `max_accel`.
-    /// Negative strength repels.
+    /// Negative strength repels. Nearby particles are usually at the cap, so to fade the pull
+    /// smoothly animate `max_accel` along with `strength`.
     PointAttractor {
-        offset: Vec2,
-        strength: f32,
-        max_accel: f32,
+        offset: Animated<Vec2>,
+        strength: Animated<f32>,
+        max_accel: Animated<f32>,
     },
     /// Swirl around a point: tangential `strength / distance`, capped at `max_accel`.
     /// Positive is counter-clockwise.
     Vortex {
-        offset: Vec2,
-        strength: f32,
-        max_accel: f32,
+        offset: Animated<Vec2>,
+        strength: Animated<f32>,
+        max_accel: Animated<f32>,
     },
     /// Exponential velocity damping, as a fraction lost per second (roughly).
-    Drag(f32),
+    Drag(Animated<f32>),
     /// Bounces particles off the edges of a rectangle centered on the owner.
     /// `restitution` is the fraction of speed kept on impact.
     Bounds {
-        half_extents: Vec2,
-        restitution: f32,
+        half_extents: Animated<Vec2>,
+        restitution: Animated<f32>,
     },
-    /// Sets color from start to end over each particle's life (replaces the spawn color).
-    /// No effect on immortal particles.
-    ColorOverLife { start: Color, end: Color },
-    /// Sets radius from start to end over life. No effect on immortal particles.
-    SizeOverLife { start: f32, end: f32 },
-    /// Sets mass from start to end over life. No effect on immortal particles.
-    MassOverLife { start: f32, end: f32 },
+    /// Linear RGB color; HDR values drive bloom. Leaves alpha alone.
+    Color(Blend, Animated<Rgb>),
+    /// Opacity.
+    Alpha(Blend, Animated<f32>),
+    /// Radius. Doesn't change mass.
+    Size(Blend, Animated<f32>),
+    Mass(Blend, Animated<f32>),
+}
+
+/// How an appearance modifier combines with the particle's current value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Blend {
+    /// Replace it.
+    Set,
+    /// Multiply it, keeping per-particle variation.
+    Scale,
+}
+
+impl Blend {
+    fn as_gpu(self) -> f32 {
+        match self {
+            Blend::Set => 0.0,
+            Blend::Scale => 1.0,
+        }
+    }
 }
 
 /// The modifier list of a space or emitter.
-#[derive(Component, Debug, Clone, Default, Deref, DerefMut)]
+#[derive(Component, Debug, Clone, Default, Deref, DerefMut, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Modifiers(pub Vec<Modifier>);
-
-impl Modifiers {
-    pub fn new(modifiers: impl IntoIterator<Item = Modifier>) -> Self {
-        Self(modifiers.into_iter().collect())
-    }
-}
 
 /// One modifier as seen by the GPU. Must match `struct Modifier` in `particle_sim.wgsl`.
 /// The meaning of `a` and `b` depends on `kind`; see [`GpuModifier::encode`].
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct GpuModifier {
     pub kind: u32,
+    /// This modifier's tracks, back to back in the track array.
+    pub track_offset: u32,
+    pub track_count: u32,
     pub a: Vec4,
     pub b: Vec4,
 }
 
 impl GpuModifier {
     /// `origin` is the owner's world position; offsets are resolved against it here.
-    fn encode(modifier: &Modifier, origin: Vec2) -> Self {
-        let (kind, a, b) = match *modifier {
-            Modifier::Acceleration(accel) => (0, accel.extend(0.0).extend(0.0), Vec4::ZERO),
+    /// Per-particle tracks are appended to `records`. `None` if a track has no keys.
+    fn encode(
+        modifier: &Modifier,
+        origin: Vec2,
+        owner_age: f32,
+        records: &mut Vec<GpuTrackRecord>,
+    ) -> Option<Self> {
+        let start = records.len();
+        let origin = origin.extend(0.0).extend(0.0);
+        let mut params = ParamEncoder::new(records, owner_age);
+        // Slots 0-3 are `a`, 4-7 are `b`.
+        let kind = match modifier {
+            Modifier::Acceleration(accel) => {
+                params.put(0, accel);
+                0
+            }
             Modifier::PointAttractor { offset, strength, max_accel } => {
-                (1, (origin + offset).extend(strength).extend(max_accel), Vec4::ZERO)
+                params.put_offset(0, offset, origin);
+                params.put(2, strength);
+                params.put(3, max_accel);
+                1
             }
             Modifier::Vortex { offset, strength, max_accel } => {
-                (2, (origin + offset).extend(strength).extend(max_accel), Vec4::ZERO)
+                params.put_offset(0, offset, origin);
+                params.put(2, strength);
+                params.put(3, max_accel);
+                2
             }
-            Modifier::Drag(k) => (3, Vec4::new(k, 0.0, 0.0, 0.0), Vec4::ZERO),
-            Modifier::Bounds { half_extents, restitution } => (
-                4,
-                origin.extend(half_extents.x).extend(half_extents.y),
-                Vec4::new(restitution, 0.0, 0.0, 0.0),
-            ),
-            Modifier::ColorOverLife { start, end } => (
-                5,
-                Vec4::from_array(start.to_linear().to_f32_array()),
-                Vec4::from_array(end.to_linear().to_f32_array()),
-            ),
-            Modifier::SizeOverLife { start, end } => (6, Vec4::new(start, end, 0.0, 0.0), Vec4::ZERO),
-            Modifier::MassOverLife { start, end } => (7, Vec4::new(start, end, 0.0, 0.0), Vec4::ZERO),
+            Modifier::Drag(k) => {
+                params.put(0, k);
+                3
+            }
+            Modifier::Bounds { half_extents, restitution } => {
+                params.put_raw(0, origin.x);
+                params.put_raw(1, origin.y);
+                params.put(2, half_extents);
+                params.put(4, restitution);
+                4
+            }
+            Modifier::Color(blend, color) => {
+                params.put(0, color);
+                params.put_raw(4, blend.as_gpu());
+                5
+            }
+            Modifier::Alpha(blend, value) => {
+                params.put(0, value);
+                params.put_raw(4, blend.as_gpu());
+                6
+            }
+            Modifier::Size(blend, value) => {
+                params.put(0, value);
+                params.put_raw(4, blend.as_gpu());
+                7
+            }
+            Modifier::Mass(blend, value) => {
+                params.put(0, value);
+                params.put_raw(4, blend.as_gpu());
+                8
+            }
         };
-        Self { kind, a, b }
+        let Some((a, b, track_count)) = params.finish() else {
+            records.truncate(start);
+            return None;
+        };
+        Some(Self { kind, track_offset: start as u32, track_count, a, b })
     }
 }
 
@@ -156,33 +222,52 @@ impl GpuModifier {
 #[extract_app(bevy::render::RenderApp)]
 pub struct ModifierUpload {
     modifiers: Vec<GpuModifier>,
+    /// Keyframe tracks the modifiers refer to.
+    tracks: Vec<GpuTrackRecord>,
     /// This frame's [`MouseTarget`], copied in when the upload is cleared.
     mouse_target: Option<Vec2>,
 }
 
 impl ModifierUpload {
     /// Appends an owner's `modifiers`, then its [`MouseAttractor`] if the mouse is held, and
-    /// returns their `(offset, count)` in the array. `origin` is the owner's world position.
+    /// returns their `(offset, count)` in the array. `origin` is the owner's world position and
+    /// `owner_age` the seconds since it started.
     pub fn push(
         &mut self,
         modifiers: Option<&Modifiers>,
         mouse: Option<&MouseAttractor>,
         origin: Vec2,
+        owner_age: f32,
     ) -> (u32, u32) {
         let offset = self.modifiers.len() as u32;
         if let Some(modifiers) = modifiers {
-            self.modifiers
-                .extend(modifiers.iter().map(|m| GpuModifier::encode(m, origin)));
+            for modifier in modifiers.iter() {
+                self.push_one(modifier, origin, owner_age);
+            }
         }
         if let (Some(mouse), Some(target)) = (mouse, self.mouse_target) {
             let attractor = Modifier::PointAttractor {
-                offset: target - origin,
-                strength: mouse.strength,
-                max_accel: mouse.max_accel,
+                offset: (target - origin).into(),
+                strength: mouse.strength.clone(),
+                max_accel: mouse.max_accel.clone(),
             };
-            self.modifiers.push(GpuModifier::encode(&attractor, origin));
+            self.push_one(&attractor, origin, owner_age);
         }
         (offset, self.modifiers.len() as u32 - offset)
+    }
+
+    fn push_one(&mut self, modifier: &Modifier, origin: Vec2, owner_age: f32) {
+        let encoded = GpuModifier::encode(modifier, origin, owner_age, &mut self.tracks);
+        self.modifiers.extend(encoded);
+    }
+
+    /// The track array to upload. Never empty, like [`Self::gpu_data`].
+    pub fn tracks_gpu_data(&self) -> Vec<GpuTrackRecord> {
+        if self.tracks.is_empty() {
+            vec![GpuTrackRecord::default()]
+        } else {
+            self.tracks.clone()
+        }
     }
 
     /// The array to upload. Never empty, because a zero-sized storage buffer can't be bound.
@@ -197,5 +282,58 @@ impl ModifierUpload {
 
 fn clear_modifier_upload(mut upload: ResMut<ModifierUpload>, mouse: Res<MouseTarget>) {
     upload.modifiers.clear();
+    upload.tracks.clear();
     upload.mouse_target = mouse.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::track::Track;
+
+    fn encode(modifier: Modifier, age: f32) -> (Option<GpuModifier>, Vec<GpuTrackRecord>) {
+        let mut records = Vec::new();
+        let encoded = GpuModifier::encode(&modifier, Vec2::new(100.0, 10.0), age, &mut records);
+        (encoded, records)
+    }
+
+    #[test]
+    fn tracks_target_their_parameter_and_constants_stay_inline() {
+        let (m, records) = encode(
+            Modifier::PointAttractor {
+                offset: Track::over_life([(0.0, Vec2::ZERO), (1.0, Vec2::X)]).into(),
+                strength: 5.0.into(),
+                max_accel: Track::over_seconds([(0.0, 1.0), (2.0, 3.0)]).looped().into(),
+            },
+            0.0,
+        );
+        let m = m.unwrap();
+        assert_eq!((m.track_count, m.a.z, records.len()), (2, 5.0, 6));
+        assert_eq!(records[0].info, UVec4::new(2, 0, 0, 2));
+        // Keys are moved by the owner's position.
+        assert_eq!(records[2].data.truncate().truncate(), Vec2::new(101.0, 10.0));
+        // Seconds clock (1) + 2 · loop (1).
+        assert_eq!(records[3].info, UVec4::new(2, 3, 3, 1));
+        assert_eq!(records[3].data.x, 2.0);
+    }
+
+    #[test]
+    fn over_time_tracks_become_constants() {
+        let drag = Track::over_time([(0.0, 0.0), (2.0, 4.0)]);
+        let (m, records) = encode(Modifier::Drag(drag.into()), 1.0);
+        let m = m.unwrap();
+        assert_eq!((m.a.x, m.track_count, records.len()), (2.0, 0, 0));
+    }
+
+    #[test]
+    fn modifiers_with_an_empty_track_are_dropped() {
+        let (m, records) = encode(
+            Modifier::Bounds {
+                half_extents: Track::over_life([(0.0, Vec2::ONE)]).into(),
+                restitution: Track::over_life(Vec::<(f32, f32)>::new()).into(),
+            },
+            0.0,
+        );
+        assert!(m.is_none() && records.is_empty());
+    }
 }

@@ -1,0 +1,218 @@
+// Demo emitters and scenes; see src/demos.rs. Number keys pick scenes in name order.
+//
+// - Emitter fields left out use `ParticleEmitter::default()`.
+// - Random ranges: (from: 0.5, to: 2.0), optionally with shape: Low(3.0), High(3.0),
+//   Middle(3.0) or Falloff(6.0).
+// - Modifier parameters: Constant(value), or
+//   Track((clock: Life, keys: [(time: 0.0, value: 1.0, ease: Smooth), ...], repeat: Loop)).
+//   Clocks: Life, Seconds, Time. Ease (Linear, Smooth, Step) and repeat (Once, Loop, PingPong)
+//   are optional.
+// - Colors in modifiers are linear RGB; emitter red/green/blue are sRGB.
+(
+    start: "cluster",
+
+    emitters: {
+        // A one-off cloud of particles that never die. Only the cloud swirls.
+        "cloud": (
+            emitter: (
+                burst_count: 300000,
+                rate: 0.0,
+                lifetime: None,
+                spawn_half_extents: (300.0, 300.0),
+                speed: (from: 5.0, to: 50.0),
+                radius: (from: 0.3, to: 1.0),
+                red: (from: 6.0, to: 9.0),
+                green: (from: 0.0, to: 0.0),
+                blue: (from: 6.0, to: 9.0),
+                alpha: (from: 0.05, to: 0.05),
+            ),
+            modifiers: [
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Constant(3000.0),
+                    max_accel: Constant(60.0),
+                ),
+                // Without drag the vortex keeps adding speed and flings the cloud apart.
+                Drag(Constant(0.4)),
+            ],
+        ),
+
+        // A self-gravitating cluster that collapses into clumps. Barnes-Hut handles this count
+        // easily; brute force costs its square and slows to a crawl.
+        "cluster": (
+            emitter: (
+                burst_count: 262144,
+                rate: 0.0,
+                lifetime: None,
+                spawn_half_extents: (300.0, 300.0),
+                speed: (from: 0.0, to: 10.0),
+                radius: (from: 0.4, to: 3.6, shape: Falloff(36.0)),
+                red: (from: 6.0, to: 9.0),
+                green: (from: 3.0, to: 5.0),
+                blue: (from: 0.0, to: 0.5),
+                alpha: (from: 0.02, to: 0.03),
+                gravity: true,
+                mass_per_radius: 6.0,
+            ),
+            modifiers: [
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((
+                        clock: Time,
+                        keys: [
+                            (time: 0.0, value: 1500.0, ease: Smooth),
+                            (time: 1.0, value: 0.0, ease: Smooth),
+                        ],
+                    )),
+                    max_accel: Constant(80.0),
+                ),
+                // Vortex(
+                //     offset: Constant((0.0, 0.0)),
+                //     strength: Constant(1500.0),
+                //     max_accel: Constant(80.0),
+                // ),
+                // Drag(Constant(0.04)),
+            ],
+        ),
+
+        // A continuous stream; each particle lives 3-5 seconds (about 400k alive at once).
+        // Pulled toward a fixed point, and toward the cursor while the mouse is held; shifts
+        // cyan -> orange, fades and shrinks.
+        "stream": (
+            emitter: (
+                rate: 100000.0,
+                lifetime: (from: 3.0, to: 5.0),
+                spawn_half_extents: (5.0, 5.0),
+                speed: (from: 120.0, to: 180.0),
+                angle: (from: 0.3, to: 0.6),
+                radius: (from: 0.4, to: 0.9),
+                alpha: (from: 0.1, to: 0.1),
+            ),
+            modifiers: [
+                PointAttractor(
+                    // Relative to the emitter.
+                    offset: Constant((750.0, 300.0)),
+                    strength: Constant(400000.0),
+                    max_accel: Constant(200.0),
+                ),
+                Color(Set, Track((
+                    clock: Life,
+                    keys: [
+                        (time: 0.0, value: (0.1, 40.0, 120.0)),
+                        (time: 1.0, value: (150.0, 20.0, 2.0)),
+                    ],
+                ))),
+                Alpha(Set, Track((
+                    clock: Life,
+                    keys: [(time: 0.0, value: 0.1), (time: 1.0, value: 0.0)],
+                ))),
+                Size(Set, Track((
+                    clock: Life,
+                    keys: [(time: 0.0, value: 1.0), (time: 1.0, value: 0.3)],
+                ))),
+            ],
+            mouse: (
+                strength: Constant(400000.0),
+                max_accel: Constant(200.0),
+            ),
+        ),
+
+        // Each particle runs blue -> magenta -> gold while fading in and out and slowing down,
+        // inside a vortex that swings back and forth for all of them at once.
+        "keyframes": (
+            emitter: (
+                rate: 5000.0,
+                lifetime: (from: 4.0, to: 7.0),
+                spawn_half_extents: (10.0, 10.0),
+                speed: (from: 30.0, to: 90.0),
+                radius: (from: 0.8, to: 2.0),
+                alpha: (from: 0.3, to: 0.6),
+                gravity: true,
+            ),
+            modifiers: [
+                Color(Set, Track((
+                    clock: Life,
+                    keys: [
+                        (time: 0.0, value: (0.2, 2.0, 8.0)),
+                        (time: 0.4, value: (6.0, 0.3, 5.0)),
+                        (time: 1.0, value: (8.0, 4.0, 0.2)),
+                    ],
+                ))),
+                // Scale keeps each particle's own random spawn alpha.
+                Alpha(Scale, Track((
+                    clock: Life,
+                    keys: [
+                        (time: 0.0, value: 0.0),
+                        (time: 0.15, value: 1.0),
+                        (time: 0.7, value: 1.0),
+                        (time: 1.0, value: 0.0),
+                    ],
+                ))),
+                Drag(Track((
+                    clock: Life,
+                    keys: [(time: 0.0, value: 0.0), (time: 1.0, value: 3.0)],
+                ))),
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((
+                        clock: Time,
+                        repeat: PingPong,
+                        keys: [
+                            (time: 0.0, value: 4000.0, ease: Smooth),
+                            (time: 3.0, value: -4000.0, ease: Smooth),
+                        ],
+                    )),
+                    max_accel: Constant(120.0),
+                ),
+            ],
+        ),
+    },
+
+    scenes: {
+        "cloud": (
+            space: (capacity: 1000000),
+            mouse: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+            emitters: [(name: "cloud")],
+        ),
+        "cluster": (
+            space: (capacity: 1000000),
+            gravity: (strength: 15.0, softening: 23.0, method: BarnesHut, theta: 0.5),
+            mouse: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+            emitters: [(name: "cluster")],
+        ),
+        "keyframes": (
+            space: (capacity: 1000000),
+            gravity: (strength: 15.0, softening: 23.0, method: BarnesHut, theta: 0.5),
+            mouse: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+            emitters: [(name: "keyframes", position: (-400.0, 200.0))],
+        ),
+        // Everything above at once, pulled toward the center and kept in a box.
+        "showcase": (
+            space: (capacity: 1000000),
+            gravity: (strength: 15.0, softening: 23.0, method: BarnesHut, theta: 0.5),
+            mouse: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+            modifiers: [
+                PointAttractor(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Constant(300000.0),
+                    max_accel: Constant(100.0),
+                ),
+                Bounds(
+                    half_extents: Constant((3620.0, 3340.0)),
+                    restitution: Constant(0.5),
+                ),
+            ],
+            emitters: [
+                (name: "cloud"),
+                (name: "cluster"),
+                (name: "stream", position: (-450.0, -150.0)),
+                (name: "keyframes", position: (-400.0, 200.0)),
+            ],
+        ),
+        "stream": (
+            space: (capacity: 1000000),
+            mouse: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+            emitters: [(name: "stream", position: (-450.0, -150.0))],
+        ),
+    },
+)

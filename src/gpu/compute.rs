@@ -27,6 +27,7 @@ use crate::{
     emitter::{EmitterUpload, GpuEmitter},
     modifier::{GpuModifier, ModifierUpload},
     spread::GpuCurve,
+    track::GpuTrackRecord,
     particle::ParticleBuffers,
     space::SimParams,
 };
@@ -52,7 +53,9 @@ pub(super) fn build(render_app: &mut SubApp) {
 
 #[derive(Resource)]
 struct SimPipelines {
+    /// `integrate` and `spawn`.
     layout: BindGroupLayoutDescriptor,
+    compact_layout: BindGroupLayoutDescriptor,
     compact: CachedComputePipelineId,
     integrate: CachedComputePipelineId,
     spawn: CachedComputePipelineId,
@@ -65,41 +68,61 @@ pub(super) struct SimBuffers {
     emitters: StorageBuffer<Vec<GpuEmitter>>,
     modifiers: StorageBuffer<Vec<GpuModifier>>,
     curves: StorageBuffer<Vec<GpuCurve>>,
+    tracks: StorageBuffer<Vec<GpuTrackRecord>>,
 }
 
 #[derive(Resource)]
-struct SimBindGroup(BindGroup);
+struct SimBindGroups {
+    sim: BindGroup,
+    compact: BindGroup,
+}
 
 fn init_pipelines(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
+    // Each layout binds only what its entry points use, to stay within WebGPU's default limit
+    // of 8 storage buffers per stage. Numbers are the `@binding`s in the shader.
     let layout = BindGroupLayoutDescriptor::new(
         "particle_sim_layout",
-        &BindGroupLayoutEntries::sequential(
+        &BindGroupLayoutEntries::with_indices(
             ShaderStages::COMPUTE,
             (
-                uniform_buffer::<SimParams>(false),
+                (0, uniform_buffer::<SimParams>(false)),
                 // particles
-                storage_buffer_sized(false, None),
+                (1, storage_buffer_sized(false, None)),
                 // free list
-                storage_buffer_sized(false, None),
-                storage_buffer_read_only::<Vec<GpuEmitter>>(false),
-                storage_buffer_read_only::<Vec<GpuModifier>>(false),
-                // gravity bodies (written by `compact`)
-                storage_buffer_sized(false, None),
-                // gravity body count (atomic, written by `compact`)
-                storage_buffer_sized(false, None),
+                (2, storage_buffer_sized(false, None)),
+                (3, storage_buffer_read_only::<Vec<GpuEmitter>>(false)),
+                (4, storage_buffer_read_only::<Vec<GpuModifier>>(false)),
                 // gravity accel (read by `integrate`)
-                storage_buffer_read_only_sized(false, None),
+                (7, storage_buffer_read_only_sized(false, None)),
                 // spread curves (read by `spawn`)
-                storage_buffer_read_only::<Vec<GpuCurve>>(false),
+                (8, storage_buffer_read_only::<Vec<GpuCurve>>(false)),
+                // modifier keyframe tracks
+                (9, storage_buffer_read_only::<Vec<GpuTrackRecord>>(false)),
+            ),
+        ),
+    );
+    let compact_layout = BindGroupLayoutDescriptor::new(
+        "particle_compact_layout",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::COMPUTE,
+            (
+                (0, uniform_buffer::<SimParams>(false)),
+                // particles
+                (1, storage_buffer_sized(false, None)),
+                (3, storage_buffer_read_only::<Vec<GpuEmitter>>(false)),
+                // gravity bodies
+                (5, storage_buffer_sized(false, None)),
+                // gravity body count (atomic)
+                (6, storage_buffer_sized(false, None)),
             ),
         ),
     );
     let shader: Handle<Shader> = asset_server.load(SHADER_ASSET_PATH);
-    let queue = |entry_point: &'static str| {
+    let queue = |entry_point: &'static str, layout: &BindGroupLayoutDescriptor| {
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(format!("particle_{entry_point}").into()),
             layout: vec![layout.clone()],
@@ -108,11 +131,12 @@ fn init_pipelines(
             ..default()
         })
     };
-    let compact = queue("compact");
-    let integrate = queue("integrate");
-    let spawn = queue("spawn");
+    let compact = queue("compact", &compact_layout);
+    let integrate = queue("integrate", &layout);
+    let spawn = queue("spawn", &layout);
     commands.insert_resource(SimPipelines {
         layout,
+        compact_layout,
         compact,
         integrate,
         spawn,
@@ -135,6 +159,8 @@ fn write_sim_buffers(
     buffers.modifiers.write_buffer(&device, &queue);
     buffers.curves.set(emitters.curves_gpu_data());
     buffers.curves.write_buffer(&device, &queue);
+    buffers.tracks.set(modifiers.tracks_gpu_data());
+    buffers.tracks.write_buffer(&device, &queue);
 }
 
 fn prepare_bind_group(
@@ -160,34 +186,46 @@ fn prepare_bind_group(
         Some(emitters),
         Some(modifiers),
         Some(curves),
+        Some(tracks),
     ) = (
         gpu,
         gravity_buffers,
         sim_buffers.emitters.binding(),
         sim_buffers.modifiers.binding(),
         sim_buffers.curves.binding(),
+        sim_buffers.tracks.binding(),
     )
     else {
-        commands.remove_resource::<SimBindGroup>();
+        commands.remove_resource::<SimBindGroups>();
         return;
     };
 
-    let bind_group = device.create_bind_group(
+    let sim = device.create_bind_group(
         "particle_sim_bind_group",
         &pipeline_cache.get_bind_group_layout(&pipelines.layout),
-        &BindGroupEntries::sequential((
-            &sim_buffers.params,
-            particles.buffer.as_entire_binding(),
-            free_list.buffer.as_entire_binding(),
-            emitters,
-            modifiers,
-            gravity.bodies.as_entire_binding(),
-            gravity.body_count.as_entire_binding(),
-            accel.buffer.as_entire_binding(),
-            curves,
+        &BindGroupEntries::with_indices((
+            (0, &sim_buffers.params),
+            (1, particles.buffer.as_entire_binding()),
+            (2, free_list.buffer.as_entire_binding()),
+            (3, emitters.clone()),
+            (4, modifiers),
+            (7, accel.buffer.as_entire_binding()),
+            (8, curves),
+            (9, tracks),
         )),
     );
-    commands.insert_resource(SimBindGroup(bind_group));
+    let compact = device.create_bind_group(
+        "particle_compact_bind_group",
+        &pipeline_cache.get_bind_group_layout(&pipelines.compact_layout),
+        &BindGroupEntries::with_indices((
+            (0, &sim_buffers.params),
+            (1, particles.buffer.as_entire_binding()),
+            (3, emitters),
+            (5, gravity.bodies.as_entire_binding()),
+            (6, gravity.body_count.as_entire_binding()),
+        )),
+    );
+    commands.insert_resource(SimBindGroups { sim, compact });
 }
 
 fn dispatch_sim(
@@ -195,21 +233,21 @@ fn dispatch_sim(
     pipelines: Res<SimPipelines>,
     gravity_pipelines: Res<GravityPipelines>,
     pipeline_cache: Res<PipelineCache>,
-    bind_group: Option<Res<SimBindGroup>>,
+    bind_groups: Option<Res<SimBindGroups>>,
     gravity_bind_groups: Option<Res<GravityBindGroups>>,
     gravity_buffers: Option<Res<GravityBuffers>>,
     params: Res<SimParams>,
     ready: Res<GpuSimReady>,
 ) {
     let (
-        Some(bind_group),
+        Some(bind_groups),
         Some(gravity_bind_groups),
         Some(gravity_buffers),
         Some(compact),
         Some(integrate),
         Some(spawn),
     ) = (
-        bind_group,
+        bind_groups,
         gravity_bind_groups,
         gravity_buffers,
         pipeline_cache.get_compute_pipeline(pipelines.compact),
@@ -254,7 +292,7 @@ fn dispatch_sim(
 
     if let Some(plan) = &gravity_plan {
         let span = diagnostics.time_span(&mut pass, "compact");
-        pass.set_bind_group(0, &bind_group.0, &[]);
+        pass.set_bind_group(0, &bind_groups.compact, &[]);
         pass.set_pipeline(compact);
         pass.dispatch_workgroups(slot_groups, 1, 1);
         span.end(&mut pass);
@@ -262,7 +300,7 @@ fn dispatch_sim(
         gravity::dispatch(&mut pass, plan, &gravity_bind_groups, &gravity_buffers, diagnostics);
     }
 
-    pass.set_bind_group(0, &bind_group.0, &[]);
+    pass.set_bind_group(0, &bind_groups.sim, &[]);
 
     // Integrate before spawn: it ages and kills particles, returning their slots to the
     // free list, so the spawn pass can reuse them in the same frame.

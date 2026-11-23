@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// Most particles that can take part in gravity. Set by the radix sort's two-level scan
 /// (16 digits × tiles of 256 must fit in 256 blocks of 256). Extra participants are left out.
@@ -8,7 +9,8 @@ pub const MAX_GRAVITY_BODIES: u32 = 1 << 20;
 ///
 /// Only particles whose emitter has `gravity: true` take part: they attract each other and
 /// feel each other's pull. Other particles ignore gravity entirely.
-#[derive(Component, Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Gravity {
     /// Gravitational constant G: acceleration = G · mass / distance².
     pub strength: f32,
@@ -21,8 +23,7 @@ pub struct Gravity {
     pub theta: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // The demo scene only uses Barnes-Hut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GravityMethod {
     /// Exact, O(n²). Practical up to ~100k participants.
     BruteForce,

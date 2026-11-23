@@ -2,6 +2,7 @@ use bevy::{
     prelude::*,
     render::{extract_resource::ExtractResource, render_resource::ShaderType},
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     gpu::GpuSimReady,
@@ -38,7 +39,8 @@ pub struct EmitterSystems;
 /// Spawning happens on the GPU: each frame the CPU only sends how many particles each
 /// emitter wants; the GPU picks free slots and rolls the random initial values.
 /// If the space is full, spawns that don't fit are dropped.
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 #[require(Transform, EmitterState)]
 pub struct ParticleEmitter {
     /// Particles spawned once, on the first frame after the emitter is added.
@@ -63,7 +65,8 @@ pub struct ParticleEmitter {
     pub red: Spread,
     pub green: Spread,
     pub blue: Spread,
-    pub alpha: f32,
+    /// Alpha range (opacity).
+    pub alpha: Spread,
     /// Whether this emitter's particles take part in the space's `Gravity`
     /// (attract each other and feel the pull). Brute-force cost grows with the square of
     /// all participating particles, so turn it on only for modest counts for now.
@@ -84,7 +87,7 @@ impl Default for ParticleEmitter {
             red: (1.0..1.0).into(),
             green: (1.0..1.0).into(),
             blue: (1.0..1.0).into(),
-            alpha: 1.0,
+            alpha: (1.0..1.0).into(),
             gravity: false,
         }
     }
@@ -96,6 +99,8 @@ pub struct EmitterState {
     /// Fractional particles carried over between frames, so low rates still spawn.
     accumulator: f32,
     burst_done: bool,
+    /// Seconds since the emitter started, for `Track::over_time`.
+    age: f32,
 }
 
 /// Maps emitter entities to their index in the GPU emitter array.
@@ -125,7 +130,7 @@ pub struct GpuEmitter {
     pub red: Vec2,
     pub green: Vec2,
     pub blue: Vec2,
-    pub alpha: f32,
+    pub alpha: Vec2,
     pub mass_per_radius: f32,
     /// This emitter's spawn requests are spawn-pass threads
     /// `spawn_offset .. spawn_offset + spawn_count`.
@@ -145,6 +150,7 @@ pub struct GpuEmitter {
     pub red_curve: u32,
     pub green_curve: u32,
     pub blue_curve: u32,
+    pub alpha_curve: u32,
 }
 
 /// This frame's emitter array and spawn requests, sent to the render world.
@@ -230,7 +236,9 @@ fn prepare_emitter_upload(
         }
 
         let position = transform.translation().truncate();
-        let (modifier_offset, modifier_count) = modifier_upload.push(modifiers, mouse, position);
+        let (modifier_offset, modifier_count) =
+            modifier_upload.push(modifiers, mouse, position, state.age);
+        state.age += dt;
 
         let curves = &mut upload.curves;
         let (speed, speed_curve) = emitter.speed.to_gpu(curves);
@@ -243,6 +251,7 @@ fn prepare_emitter_upload(
         let (red, red_curve) = emitter.red.to_gpu(curves);
         let (green, green_curve) = emitter.green.to_gpu(curves);
         let (blue, blue_curve) = emitter.blue.to_gpu(curves);
+        let (alpha, alpha_curve) = emitter.alpha.to_gpu(curves);
 
         upload.emitters.push(GpuEmitter {
             position,
@@ -254,7 +263,7 @@ fn prepare_emitter_upload(
             red,
             green,
             blue,
-            alpha: emitter.alpha,
+            alpha,
             mass_per_radius: emitter.mass_per_radius,
             spawn_offset: spawn_total,
             spawn_count,
@@ -269,6 +278,7 @@ fn prepare_emitter_upload(
             red_curve,
             green_curve,
             blue_curve,
+            alpha_curve,
         });
         spawn_total += spawn_count;
     }

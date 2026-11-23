@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 ///
 /// Must match `struct Particle` in every shader under `assets/shaders/`.
 /// Layout (std430, 64 bytes): position @0, velocity @8, color @16, mass @32, radius @36,
-/// age @40, lifetime @44, emitter @48, then 12 bytes of padding.
+/// age @40, lifetime @44, emitter @48, base_radius @52, base_color @56.
 ///
 /// A slot is alive when `lifetime < 0` (immortal) or `age < lifetime`.
 /// An all-zero slot is dead, so a zero-initialized buffer starts empty.
@@ -24,7 +24,11 @@ pub struct GpuParticle {
     pub lifetime: f32,
     /// Index of the owning emitter in the GPU emitter array (see `EmitterRegistry`).
     pub emitter: u32,
-    pub _padding: [u32; 3],
+    /// Spawn values. Every frame color, radius and mass (= radius × the emitter's
+    /// `mass_per_radius`) start from these before appearance modifiers apply.
+    pub base_radius: f32,
+    /// Linear RGBA packed as four half floats.
+    pub base_color: [u32; 2],
 }
 
 const _: () = assert!(size_of::<GpuParticle>() == 64);

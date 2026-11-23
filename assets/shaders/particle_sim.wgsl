@@ -11,6 +11,9 @@ struct Particle {
     age: f32,
     lifetime: f32,
     emitter: u32,
+    // Spawn values that appearance modifiers start from each frame.
+    base_radius: f32,
+    base_color: vec2<u32>,
 }
 
 // Must match `SimParams` in src/space.rs.
@@ -43,7 +46,7 @@ struct Emitter {
     red: vec2<f32>,
     green: vec2<f32>,
     blue: vec2<f32>,
-    alpha: f32,
+    alpha: vec2<f32>,
     mass_per_radius: f32,
     spawn_offset: u32,
     spawn_count: u32,
@@ -58,6 +61,7 @@ struct Emitter {
     red_curve: u32,
     green_curve: u32,
     blue_curve: u32,
+    alpha_curve: u32,
 }
 
 // A `Spread` shape as a lookup table: t at u = i / (CURVE_SAMPLES - 1), four per vec4.
@@ -71,8 +75,20 @@ struct Curve {
 // Must match `GpuModifier` in src/modifier.rs; `a`/`b` are decoded per kind below.
 struct Modifier {
     kind: u32,
+    // This modifier's tracks, back to back in `tracks`.
+    track_offset: u32,
+    track_count: u32,
     a: vec4<f32>,
     b: vec4<f32>,
+}
+
+// Keyframe tracks: a header record, then one record per key. Must match `GpuTrackRecord`
+// in src/track.rs.
+//   header: data.x = period, info = (key count, clock + 2 * repeat, slot, width)
+//   key:    data = value, info = (bitcast time, ease, 0, 0)
+struct TrackRecord {
+    data: vec4<f32>,
+    info: vec4<u32>,
 }
 
 // Stack of dead slot indices. `count` is signed so that failed pops can briefly
@@ -92,15 +108,25 @@ struct FreeList {
 @group(0) @binding(6) var<storage, read_write> body_count: atomic<u32>;
 @group(0) @binding(7) var<storage, read> accel: array<vec2<f32>>;
 @group(0) @binding(8) var<storage, read> curves: array<Curve>;
+@group(0) @binding(9) var<storage, read> tracks: array<TrackRecord>;
 
 const MOD_ACCELERATION: u32 = 0u;
 const MOD_POINT_ATTRACTOR: u32 = 1u;
 const MOD_VORTEX: u32 = 2u;
 const MOD_DRAG: u32 = 3u;
 const MOD_BOUNDS: u32 = 4u;
-const MOD_COLOR_OVER_LIFE: u32 = 5u;
-const MOD_SIZE_OVER_LIFE: u32 = 6u;
-const MOD_MASS_OVER_LIFE: u32 = 7u;
+// Kinds from here on are appearance modifiers; the ones before are forces.
+const MOD_FIRST_APPEARANCE: u32 = 5u;
+const MOD_COLOR: u32 = 5u;
+const MOD_ALPHA: u32 = 6u;
+const MOD_SIZE: u32 = 7u;
+const MOD_MASS: u32 = 8u;
+
+const CLOCK_SECONDS: u32 = 1u;
+const REPEAT_LOOP: u32 = 1u;
+const REPEAT_PING_PONG: u32 = 2u;
+const EASE_SMOOTH: u32 = 1u;
+const EASE_STEP: u32 = 2u;
 
 fn is_alive(p: Particle) -> bool {
     return p.lifetime < 0.0 || p.age < p.lifetime;
@@ -156,27 +182,108 @@ fn integrate(@builtin(global_invocation_id) id: vec3<u32>) {
         p.velocity += accel[i] * params.dt;
     }
 
+    // Start from the spawn appearance, so that scaling doesn't compound across frames.
+    p.color = vec4(unpack2x16float(p.base_color.x), unpack2x16float(p.base_color.y));
+    p.radius = p.base_radius;
+    p.mass = p.base_radius * emitter.mass_per_radius;
+
     // Space modifiers first, then the particle's own emitter's.
-    apply_modifiers(&p, params.modifier_offset, params.modifier_count);
-    apply_modifiers(&p, emitter.modifier_offset, emitter.modifier_count);
+    apply_modifiers(&p, params.modifier_offset, params.modifier_count, true);
+    apply_modifiers(&p, emitter.modifier_offset, emitter.modifier_count, true);
 
     p.position += p.velocity * params.dt;
     particles[i] = p;
 }
 
-fn apply_modifiers(p: ptr<function, Particle>, offset: u32, count: u32) {
+fn apply_modifiers(p: ptr<function, Particle>, offset: u32, count: u32, forces: bool) {
     for (var k = offset; k < offset + count; k++) {
-        apply_modifier(p, modifiers[k]);
+        let m = modifiers[k];
+        if m.kind >= MOD_FIRST_APPEARANCE {
+            apply_appearance(p, m);
+        } else if forces {
+            apply_force(p, resolve(m, *p));
+        }
     }
 }
 
-fn apply_modifier(p: ptr<function, Particle>, m: Modifier) {
-    let dt = params.dt;
-    // Fraction of life used, or -1 for immortal particles (over-life modifiers skip those).
-    var life = -1.0;
-    if (*p).lifetime > 0.0 {
-        life = saturate((*p).age / (*p).lifetime);
+// Fills in a modifier's animated parameters for one particle.
+fn resolve(modifier: Modifier, p: Particle) -> Modifier {
+    var m = modifier;
+    var header = m.track_offset;
+    for (var k = 0u; k < m.track_count; k++) {
+        let info = tracks[header].info;
+        let value = sample_track(header, p);
+        m.a = write_slots(m.a, value, 0, i32(info.z), i32(info.w));
+        m.b = write_slots(m.b, value, 4, i32(info.z), i32(info.w));
+        header += 1u + info.x;
     }
+    return m;
+}
+
+// `current` is floats `base .. base + 4` of a modifier's eight; replaces those covered by
+// the `width` floats starting at `slot`.
+fn write_slots(current: vec4<f32>, value: vec4<f32>, base: i32, slot: i32, width: i32) -> vec4<f32> {
+    let i = vec4(0, 1, 2, 3) + vec4(base - slot);
+    let covered = (i >= vec4(0)) & (i < vec4(width));
+    let c = clamp(i, vec4(0), vec4(3));
+    let moved = vec4(value[c.x], value[c.y], value[c.z], value[c.w]);
+    return select(current, moved, covered);
+}
+
+// Fraction of life used; 0 for immortal particles.
+fn life_fraction(p: Particle) -> f32 {
+    if p.lifetime > 0.0 {
+        return saturate(p.age / p.lifetime);
+    }
+    return 0.0;
+}
+
+// Must match `Track::sample` in src/track.rs.
+fn sample_track(header: u32, p: Particle) -> vec4<f32> {
+    let period = tracks[header].data.x;
+    let count = tracks[header].info.x;
+    let clock = tracks[header].info.y & 1u;
+    let repeat = tracks[header].info.y >> 1u;
+
+    var t = life_fraction(p);
+    if clock == CLOCK_SECONDS {
+        t = p.age;
+    }
+    if period > 0.0 {
+        if repeat == REPEAT_LOOP {
+            t -= period * floor(t / period);
+        } else if repeat == REPEAT_PING_PONG {
+            let cycle = 2.0 * period;
+            t = period - abs(t - cycle * floor(t / cycle) - period);
+        }
+    }
+
+    // `next` = the first key after t.
+    let first = header + 1u;
+    var next = 0u;
+    while next < count && bitcast<f32>(tracks[first + next].info.x) <= t {
+        next++;
+    }
+    if next == 0u {
+        return tracks[first].data;
+    }
+    let from_key = tracks[first + next - 1u];
+    if next == count {
+        return from_key.data;
+    }
+    let to_key = tracks[first + next];
+    let from_time = bitcast<f32>(from_key.info.x);
+    var x = (t - from_time) / (bitcast<f32>(to_key.info.x) - from_time);
+    if from_key.info.y == EASE_SMOOTH {
+        x = x * x * (3.0 - 2.0 * x);
+    } else if from_key.info.y == EASE_STEP {
+        x = 0.0;
+    }
+    return mix(from_key.data, to_key.data, x);
+}
+
+fn apply_force(p: ptr<function, Particle>, m: Modifier) {
+    let dt = params.dt;
 
     switch m.kind {
         // a.xy = acceleration
@@ -220,23 +327,33 @@ fn apply_modifier(p: ptr<function, Particle>, m: Modifier) {
             }
             (*p).position = clamp((*p).position, lo, hi);
         }
-        // a = start color, b = end color (linear RGBA)
-        case MOD_COLOR_OVER_LIFE: {
-            if life >= 0.0 {
-                (*p).color = mix(m.a, m.b, life);
-            }
+        default: {}
+    }
+}
+
+// Every kind: a = value, b.x = 1 to scale the current value or 0 to replace it.
+fn apply_appearance(p: ptr<function, Particle>, modifier: Modifier) {
+    // Over-life tracks mean nothing to immortal particles. (Each kind has one parameter.)
+    if modifier.track_count > 0u && (*p).lifetime < 0.0
+        && (tracks[modifier.track_offset].info.y & 1u) != CLOCK_SECONDS {
+        return;
+    }
+    let m = resolve(modifier, *p);
+    let scale = m.b.x != 0.0;
+
+    switch m.kind {
+        case MOD_COLOR: {
+            let rgb = m.a.xyz * select(vec3(1.0), (*p).color.rgb, scale);
+            (*p).color = vec4(rgb, (*p).color.a);
         }
-        // a.x = start radius, a.y = end radius
-        case MOD_SIZE_OVER_LIFE: {
-            if life >= 0.0 {
-                (*p).radius = mix(m.a.x, m.a.y, life);
-            }
+        case MOD_ALPHA: {
+            (*p).color.a = m.a.x * select(1.0, (*p).color.a, scale);
         }
-        // a.x = start mass, a.y = end mass
-        case MOD_MASS_OVER_LIFE: {
-            if life >= 0.0 {
-                (*p).mass = mix(m.a.x, m.a.y, life);
-            }
+        case MOD_SIZE: {
+            (*p).radius = m.a.x * select(1.0, (*p).radius, scale);
+        }
+        case MOD_MASS: {
+            (*p).mass = m.a.x * select(1.0, (*p).mass, scale);
         }
         default: {}
     }
@@ -285,15 +402,25 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
         sample_spread(em.blue, em.blue_curve, &rng),
     );
 
+    let alpha = sample_spread(em.alpha, em.alpha_curve, &rng);
+
     var p: Particle;
     p.position = em.position + offset;
     p.velocity = vec2(cos(direction), sin(direction)) * speed;
-    p.color = vec4(srgb_to_linear(srgb), em.alpha);
+    p.color = vec4(srgb_to_linear(srgb), alpha);
     p.mass = radius * em.mass_per_radius;
     p.radius = radius;
     p.age = 0.0;
     p.lifetime = lifetime;
     p.emitter = e;
+    p.base_radius = radius;
+    // 65504 is the largest half float.
+    let packed = clamp(p.color, vec4(-65504.0), vec4(65504.0));
+    p.base_color = vec2(pack2x16float(packed.xy), pack2x16float(packed.zw));
+    // `integrate` won't see this particle until next frame, but it's drawn this frame: apply
+    // appearance now so that e.g. a fade-in doesn't flash.
+    apply_modifiers(&p, params.modifier_offset, params.modifier_count, false);
+    apply_modifiers(&p, em.modifier_offset, em.modifier_count, false);
     particles[slot] = p;
 }
 

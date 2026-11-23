@@ -12,6 +12,7 @@
 use std::ops::Range;
 
 use bevy::{prelude::*, render::render_resource::ShaderType};
+use serde::{Deserialize, Serialize};
 
 /// Points per lookup table. Must match `CURVE_SAMPLES` in `particle_sim.wgsl`.
 pub const CURVE_SAMPLES: usize = 32;
@@ -24,10 +25,33 @@ pub const NO_CURVE: u32 = u32::MAX;
 /// radius: (0.5..2.0).into(),                              // uniform
 /// radius: Spread::new(0.5..8.0, Shape::Falloff(6.0)),    // mostly small, a few large
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "SpreadData", into = "SpreadData")]
 pub struct Spread {
     pub range: Range<f32>,
     pub shape: Shape,
+}
+
+/// A [`Spread`] as written in data files: `(from: 0.5, to: 2.0, shape: Low(3.0))`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpreadData {
+    from: f32,
+    to: f32,
+    #[serde(default)]
+    shape: Shape,
+}
+
+impl From<SpreadData> for Spread {
+    fn from(data: SpreadData) -> Self {
+        Self::new(data.from..data.to, data.shape)
+    }
+}
+
+impl From<Spread> for SpreadData {
+    fn from(spread: Spread) -> Self {
+        Self { from: spread.range.start, to: spread.range.end, shape: spread.shape }
+    }
 }
 
 impl Spread {
@@ -55,10 +79,11 @@ impl From<Range<f32>> for Spread {
 
 /// How values are distributed across a [`Spread`]'s range. "Start" and "end" refer to the
 /// range as written, so `Low` on `8.0..0.5` favors 8.0.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // A toolbox: the demo scene doesn't use every shape.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[allow(dead_code)] // A toolbox: not every shape is used.
 pub enum Shape {
     /// Every value equally likely.
+    #[default]
     Uniform,
     /// Favors the start: `t = u^power`. Higher power, stronger bias (2 = mild, 6 = strong).
     Low(f32),
@@ -73,6 +98,9 @@ pub enum Shape {
     /// Your own mapping from `u` in [0, 1] to `t` in [0, 1]. It should rise from 0 to 1;
     /// results are clamped to [0, 1]. A plain `fn` or a closure that captures nothing:
     /// `Shape::Custom(|u| u * u * (3.0 - 2.0 * u))`.
+    ///
+    /// Code only: it can't be loaded from or saved to a data file.
+    #[serde(skip)]
     Custom(fn(f32) -> f32),
 }
 

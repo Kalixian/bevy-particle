@@ -11,6 +11,9 @@ struct Particle {
     age: f32,
     lifetime: f32,
     emitter: u32,
+    // Spawn values that appearance modifiers start from each frame.
+    base_radius: f32,
+    base_color: vec2<u32>,
 }
 
 // Only the first field of Bevy's `View` uniform; the rest of the binding is ignored.

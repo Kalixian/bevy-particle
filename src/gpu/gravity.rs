@@ -34,8 +34,8 @@ use crate::{particle::ParticleBuffers, space::SimParams};
 const BRUTE_SHADER: &str = "shaders/gravity_brute.wgsl";
 const BARNES_HUT_SHADER: &str = "shaders/gravity_bh.wgsl";
 const WORKGROUP_SIZE: u32 = 256;
-/// Storage buffers the Barnes-Hut layout binds in one stage.
-const BARNES_HUT_STORAGE_BUFFERS: u32 = 13;
+/// Most storage buffers any Barnes-Hut layout binds (WebGPU's default limit per stage).
+const BARNES_HUT_STORAGE_BUFFERS: u32 = 8;
 const RADIX_PASSES: usize = 8;
 /// Must match `FORCE_WG` in `gravity_bh.wgsl`.
 const FORCE_WORKGROUP_SIZE: u32 = 256;
@@ -92,7 +92,11 @@ pub(super) struct GravityPipelines {
 }
 
 struct BarnesHutPipelines {
-    layout: BindGroupLayoutDescriptor,
+    /// Bounds, Morton codes and radix sort.
+    sort_layout: BindGroupLayoutDescriptor,
+    build_layout: BindGroupLayoutDescriptor,
+    /// Mass summary and force.
+    walk_layout: BindGroupLayoutDescriptor,
     bounds: CachedComputePipelineId,
     morton: CachedComputePipelineId,
     histogram: CachedComputePipelineId,
@@ -107,7 +111,13 @@ struct BarnesHutPipelines {
 #[derive(Resource)]
 pub(super) struct GravityBindGroups {
     brute: BindGroup,
-    barnes_hut: Option<BindGroup>,
+    barnes_hut: Option<BarnesHutBindGroups>,
+}
+
+struct BarnesHutBindGroups {
+    sort: BindGroup,
+    build: BindGroup,
+    walk: BindGroup,
 }
 
 fn init_pipelines(
@@ -159,31 +169,60 @@ fn init_pipelines(
 
 fn queue_barnes_hut(asset_server: &AssetServer, pipeline_cache: &PipelineCache) -> BarnesHutPipelines {
     let storage = || storage_buffer_sized(false, None);
-    let layout = BindGroupLayoutDescriptor::new(
-        "gravity_bh_layout",
-        &BindGroupLayoutEntries::sequential(
+    // Each layout binds only what its entry points use, to stay within
+    // BARNES_HUT_STORAGE_BUFFERS. Numbers are the `@binding`s in the shader.
+    let sort_layout = BindGroupLayoutDescriptor::new(
+        "gravity_bh_sort_layout",
+        &BindGroupLayoutEntries::with_indices(
             ShaderStages::COMPUTE,
             (
-                uniform_buffer::<SimParams>(false),
-                uniform_buffer::<RadixPassParams>(true),
-                storage(), // bodies
-                storage(), // body_count
-                storage(), // accel
-                storage(), // bounds
-                storage(), // keys
-                storage(), // vals
-                storage(), // hist
-                storage(), // nodes
-                storage(), // leaf_parent
-                storage(), // node_data
-                storage(), // visits
-                storage(), // packed_nodes
-                storage(), // sorted_bodies
+                (0, uniform_buffer::<SimParams>(false)),
+                (1, uniform_buffer::<RadixPassParams>(true)),
+                (2, storage()), // bodies
+                (3, storage()), // body_count
+                (5, storage()), // bounds
+                (6, storage()), // keys
+                (7, storage()), // vals
+                (8, storage()), // hist
+            ),
+        ),
+    );
+    let build_layout = BindGroupLayoutDescriptor::new(
+        "gravity_bh_build_layout",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::COMPUTE,
+            (
+                (0, uniform_buffer::<SimParams>(false)),
+                (2, storage()),  // bodies
+                (3, storage()),  // body_count
+                (5, storage()),  // bounds
+                (6, storage()),  // keys
+                (7, storage()),  // vals
+                (9, storage()),  // nodes
+                (10, storage()), // leaf_parent
+                (14, storage()), // sorted_bodies
+            ),
+        ),
+    );
+    let walk_layout = BindGroupLayoutDescriptor::new(
+        "gravity_bh_walk_layout",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::COMPUTE,
+            (
+                (0, uniform_buffer::<SimParams>(false)),
+                (3, storage()),  // body_count
+                (4, storage()),  // accel
+                (9, storage()),  // nodes
+                (10, storage()), // leaf_parent
+                (11, storage()), // node_data
+                (12, storage()), // visits
+                (13, storage()), // packed_nodes
+                (14, storage()), // sorted_bodies
             ),
         ),
     );
     let shader: Handle<Shader> = asset_server.load(BARNES_HUT_SHADER);
-    let queue = |entry_point: &'static str| {
+    let queue = |entry_point: &'static str, layout: &BindGroupLayoutDescriptor| {
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(format!("gravity_bh_{entry_point}").into()),
             layout: vec![layout.clone()],
@@ -193,16 +232,18 @@ fn queue_barnes_hut(asset_server: &AssetServer, pipeline_cache: &PipelineCache) 
         })
     };
     BarnesHutPipelines {
-        bounds: queue("bounds_pass"),
-        morton: queue("morton"),
-        histogram: queue("radix_histogram"),
-        scan_blocks: queue("radix_scan_blocks"),
-        scan_sums: queue("radix_scan_sums"),
-        scatter: queue("radix_scatter"),
-        build_tree: queue("build_tree"),
-        summarize: queue("summarize"),
-        force: queue("force"),
-        layout,
+        bounds: queue("bounds_pass", &sort_layout),
+        morton: queue("morton", &sort_layout),
+        histogram: queue("radix_histogram", &sort_layout),
+        scan_blocks: queue("radix_scan_blocks", &sort_layout),
+        scan_sums: queue("radix_scan_sums", &sort_layout),
+        scatter: queue("radix_scatter", &sort_layout),
+        build_tree: queue("build_tree", &build_layout),
+        summarize: queue("summarize", &walk_layout),
+        force: queue("force", &walk_layout),
+        sort_layout,
+        build_layout,
+        walk_layout,
     }
 }
 
@@ -299,28 +340,51 @@ fn prepare_bind_groups(
             accel.clone(),
         )),
     );
-    let barnes_hut = pipelines.barnes_hut.as_ref().map(|bh| {
-        device.create_bind_group(
-            "gravity_bh_bind_group",
-            &pipeline_cache.get_bind_group_layout(&bh.layout),
-            &BindGroupEntries::sequential((
-                &sim_buffers.params,
-                radix_params,
-                buffers.bodies.as_entire_binding(),
-                buffers.body_count.as_entire_binding(),
-                accel,
-                buffers.bounds.as_entire_binding(),
-                buffers.keys.as_entire_binding(),
-                buffers.vals.as_entire_binding(),
-                buffers.hist.as_entire_binding(),
-                buffers.nodes.as_entire_binding(),
-                buffers.leaf_parent.as_entire_binding(),
-                buffers.node_data.as_entire_binding(),
-                buffers.visits.as_entire_binding(),
-                buffers.packed_nodes.as_entire_binding(),
-                buffers.sorted_bodies.as_entire_binding(),
+    let barnes_hut = pipelines.barnes_hut.as_ref().map(|bh| BarnesHutBindGroups {
+        sort: device.create_bind_group(
+            "gravity_bh_sort_bind_group",
+            &pipeline_cache.get_bind_group_layout(&bh.sort_layout),
+            &BindGroupEntries::with_indices((
+                (0, &sim_buffers.params),
+                (1, radix_params),
+                (2, buffers.bodies.as_entire_binding()),
+                (3, buffers.body_count.as_entire_binding()),
+                (5, buffers.bounds.as_entire_binding()),
+                (6, buffers.keys.as_entire_binding()),
+                (7, buffers.vals.as_entire_binding()),
+                (8, buffers.hist.as_entire_binding()),
             )),
-        )
+        ),
+        build: device.create_bind_group(
+            "gravity_bh_build_bind_group",
+            &pipeline_cache.get_bind_group_layout(&bh.build_layout),
+            &BindGroupEntries::with_indices((
+                (0, &sim_buffers.params),
+                (2, buffers.bodies.as_entire_binding()),
+                (3, buffers.body_count.as_entire_binding()),
+                (5, buffers.bounds.as_entire_binding()),
+                (6, buffers.keys.as_entire_binding()),
+                (7, buffers.vals.as_entire_binding()),
+                (9, buffers.nodes.as_entire_binding()),
+                (10, buffers.leaf_parent.as_entire_binding()),
+                (14, buffers.sorted_bodies.as_entire_binding()),
+            )),
+        ),
+        walk: device.create_bind_group(
+            "gravity_bh_walk_bind_group",
+            &pipeline_cache.get_bind_group_layout(&bh.walk_layout),
+            &BindGroupEntries::with_indices((
+                (0, &sim_buffers.params),
+                (3, buffers.body_count.as_entire_binding()),
+                (4, accel),
+                (9, buffers.nodes.as_entire_binding()),
+                (10, buffers.leaf_parent.as_entire_binding()),
+                (11, buffers.node_data.as_entire_binding()),
+                (12, buffers.visits.as_entire_binding()),
+                (13, buffers.packed_nodes.as_entire_binding()),
+                (14, buffers.sorted_bodies.as_entire_binding()),
+            )),
+        ),
     });
     commands.insert_resource(GravityBindGroups { brute, barnes_hut });
 }
@@ -401,14 +465,17 @@ pub(super) fn dispatch(
             span.end(pass);
         }
         GravityPlan::BarnesHut(p) => {
-            let Some(bind_group) = &bind_groups.barnes_hut else {
+            let Some(groups) = &bind_groups.barnes_hut else {
                 return;
             };
             let scan_groups = (16 * body_groups).div_ceil(WORKGROUP_SIZE);
-            let run = |pass: &mut ComputePass, pipeline: &ComputePipeline, radix_pass: usize, groups: u32| {
-                pass.set_bind_group(0, bind_group, &[buffers.radix_offsets[radix_pass]]);
+            let run = |pass: &mut ComputePass, pipeline: &ComputePipeline, workgroups: u32| {
                 pass.set_pipeline(pipeline);
-                pass.dispatch_workgroups(groups, 1, 1);
+                pass.dispatch_workgroups(workgroups, 1, 1);
+            };
+            // Only the sort layout has the per-radix-pass uniform (a dynamic offset).
+            let bind_sort = |pass: &mut ComputePass, radix_pass: usize| {
+                pass.set_bind_group(0, &groups.sort, &[buffers.radix_offsets[radix_pass]]);
             };
             let timed = |pass: &mut ComputePass, name: &'static str, body: &dyn Fn(&mut ComputePass)| {
                 let span = diagnostics.time_span(pass, name);
@@ -417,21 +484,32 @@ pub(super) fn dispatch(
             };
 
             timed(pass, "gravity_bh_1_bounds_morton", &|pass| {
-                run(pass, p.bounds, 0, body_groups);
-                run(pass, p.morton, 0, body_groups);
+                bind_sort(pass, 0);
+                run(pass, p.bounds, body_groups);
+                run(pass, p.morton, body_groups);
             });
             timed(pass, "gravity_bh_2_sort", &|pass| {
                 for radix_pass in 0..RADIX_PASSES {
-                    run(pass, p.histogram, radix_pass, body_groups);
-                    run(pass, p.scan_blocks, radix_pass, scan_groups);
-                    run(pass, p.scan_sums, radix_pass, 1);
-                    run(pass, p.scatter, radix_pass, body_groups);
+                    bind_sort(pass, radix_pass);
+                    run(pass, p.histogram, body_groups);
+                    run(pass, p.scan_blocks, scan_groups);
+                    run(pass, p.scan_sums, 1);
+                    run(pass, p.scatter, body_groups);
                 }
             });
-            timed(pass, "gravity_bh_3_build", &|pass| run(pass, p.build_tree, 0, body_groups));
-            timed(pass, "gravity_bh_4_summarize", &|pass| run(pass, p.summarize, 0, body_groups));
+            timed(pass, "gravity_bh_3_build", &|pass| {
+                pass.set_bind_group(0, &groups.build, &[]);
+                run(pass, p.build_tree, body_groups);
+            });
+            timed(pass, "gravity_bh_4_summarize", &|pass| {
+                pass.set_bind_group(0, &groups.walk, &[]);
+                run(pass, p.summarize, body_groups);
+            });
             let force_groups = buffers.max_bodies.div_ceil(FORCE_WORKGROUP_SIZE);
-            timed(pass, "gravity_bh_5_force", &|pass| run(pass, p.force, 0, force_groups));
+            timed(pass, "gravity_bh_5_force", &|pass| {
+                pass.set_bind_group(0, &groups.walk, &[]);
+                run(pass, p.force, force_groups);
+            });
         }
     }
 }
