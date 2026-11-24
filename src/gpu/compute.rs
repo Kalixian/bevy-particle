@@ -23,6 +23,7 @@ use bevy::{
 
 use super::{
     gravity::{self, GravityBindGroups, GravityBuffers, GravityPipelines, GravityPlan},
+    live::{LiveBuffers, LivePipelines},
     GpuSimReady,
 };
 use crate::{
@@ -77,11 +78,11 @@ struct SimBuffers {
 ///
 /// [`ParticleBuffers::id`]: crate::particle::ParticleBuffers::id
 #[derive(Resource, Default)]
-struct SpaceGpus(HashMap<AssetId<ShaderBuffer>, SpaceGpu>);
+pub(super) struct SpaceGpus(pub HashMap<AssetId<ShaderBuffer>, SpaceGpu>);
 
-#[derive(Default)]
-struct SpaceGpu {
+pub(super) struct SpaceGpu {
     params: UniformBuffer<SimParams>,
+    pub live: LiveBuffers,
     /// `Some` while the space has gravity.
     gravity: Option<GravityBuffers>,
     /// `None` until everything they bind is ready.
@@ -90,6 +91,7 @@ struct SpaceGpu {
 
 struct SpaceBindGroups {
     sim: BindGroup,
+    live: BindGroup,
     /// For `compact`, and for the gravity passes.
     gravity: Option<(BindGroup, GravityBindGroups)>,
 }
@@ -192,7 +194,12 @@ fn prepare_spaces(
     let current: HashSet<_> = uploads.0.iter().map(|upload| upload.buffers.id()).collect();
     spaces.0.retain(|id, _| current.contains(id));
     for SpaceUpload { buffers, params, .. } in &uploads.0 {
-        let space = spaces.0.entry(buffers.id()).or_default();
+        let space = spaces.0.entry(buffers.id()).or_insert_with(|| SpaceGpu {
+            params: default(),
+            live: LiveBuffers::new(buffers.capacity, &device),
+            gravity: None,
+            bind_groups: None,
+        });
         space.params.set(*params);
         space.params.write_buffer(&device, &queue);
         GravityBuffers::update(&mut space.gravity, params, &gravity_pipelines, &device, &queue);
@@ -202,6 +209,7 @@ fn prepare_spaces(
 fn prepare_bind_groups(
     pipelines: Res<SimPipelines>,
     gravity_pipelines: Res<GravityPipelines>,
+    live_pipelines: Res<LivePipelines>,
     pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     sim_buffers: Res<SimBuffers>,
@@ -219,6 +227,7 @@ fn prepare_bind_groups(
             &sim_buffers,
             &pipelines,
             &gravity_pipelines,
+            &live_pipelines,
             &pipeline_cache,
             &device,
             &gpu_buffers,
@@ -232,6 +241,7 @@ fn create_bind_groups(
     sim_buffers: &SimBuffers,
     pipelines: &SimPipelines,
     gravity_pipelines: &GravityPipelines,
+    live_pipelines: &LivePipelines,
     pipeline_cache: &PipelineCache,
     device: &RenderDevice,
     gpu_buffers: &RenderAssets<GpuShaderBuffer>,
@@ -258,6 +268,13 @@ fn create_bind_groups(
             (9, sim_buffers.tracks.binding()?),
         )),
     );
+    let live = live_pipelines.bind_group(
+        space.params.binding()?,
+        &particles.buffer,
+        &space.live,
+        pipeline_cache,
+        device,
+    );
     let gravity = match &space.gravity {
         Some(gravity) => {
             let compact = device.create_bind_group(
@@ -282,13 +299,15 @@ fn create_bind_groups(
         }
         None => None,
     };
-    Some(SpaceBindGroups { sim, gravity })
+    Some(SpaceBindGroups { sim, live, gravity })
 }
 
 /// One space's passes this frame.
 struct SpacePlan<'a> {
     params: &'a SimParams,
     sim: &'a BindGroup,
+    /// `None` for hidden spaces, whose live list nothing needs.
+    live: Option<&'a BindGroup>,
     gravity: Option<SpaceGravityPlan<'a>>,
 }
 
@@ -315,13 +334,19 @@ fn plan_space<'a>(
         }),
         _ => None,
     };
-    Some(SpacePlan { params: &upload.params, sim: &bind_groups.sim, gravity })
+    Some(SpacePlan {
+        params: &upload.params,
+        sim: &bind_groups.sim,
+        live: upload.visible.then_some(&bind_groups.live),
+        gravity,
+    })
 }
 
 fn dispatch_sim(
     mut ctx: RenderContext,
     pipelines: Res<SimPipelines>,
     gravity_pipelines: Res<GravityPipelines>,
+    live_pipelines: Res<LivePipelines>,
     pipeline_cache: Res<PipelineCache>,
     uploads: Res<SpaceUploads>,
     spaces: Res<SpaceGpus>,
@@ -329,9 +354,13 @@ fn dispatch_sim(
 ) {
     let mut simulated = HashSet::default();
     let mut plans = Vec::new();
-    let sim_pipelines = pipeline_cache
-        .get_compute_pipeline(pipelines.integrate)
-        .zip(pipeline_cache.get_compute_pipeline(pipelines.spawn));
+    let sim_pipelines = (|| {
+        Some((
+            pipeline_cache.get_compute_pipeline(pipelines.integrate)?,
+            pipeline_cache.get_compute_pipeline(pipelines.spawn)?,
+            live_pipelines.resolve(&pipeline_cache)?,
+        ))
+    })();
     if sim_pipelines.is_some() {
         for upload in &uploads.0 {
             let id = upload.buffers.id();
@@ -345,7 +374,7 @@ fn dispatch_sim(
         }
     }
     ready.set(simulated);
-    let Some((integrate, spawn)) = sim_pipelines else {
+    let Some((integrate, spawn, live_passes)) = sim_pipelines else {
         return;
     };
     if plans.is_empty() {
@@ -369,7 +398,7 @@ fn dispatch_sim(
     let total_span = diagnostics.time_span(&mut pass, "particles");
     // Each dispatch is its own synchronization scope, so every pass sees the writes of the
     // passes before it.
-    for SpacePlan { params, sim, gravity } in &plans {
+    for SpacePlan { params, sim, live, gravity } in &plans {
         let slot_groups = params.capacity.div_ceil(WORKGROUP_SIZE);
 
         if let Some(plan) = gravity {
@@ -396,6 +425,10 @@ fn dispatch_sim(
             pass.set_pipeline(spawn);
             pass.dispatch_workgroups(params.spawn_total.div_ceil(WORKGROUP_SIZE), 1, 1);
             span.end(&mut pass);
+        }
+
+        if let Some(live) = live {
+            live_passes.dispatch(&mut pass, live, params.capacity, diagnostics);
         }
     }
     total_span.end(&mut pass);

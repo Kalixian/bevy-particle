@@ -1,7 +1,7 @@
-// Draws one quad per particle (6 vertices, one instance each) straight from the particle
+// Draws one quad per live particle (6 vertices, one instance each) straight from the particle
 // buffer, as a disk or with a texture.
 
-import package::gpu::shaders::types::{Particle, is_alive};
+import package::gpu::shaders::types::Particle;
 import package::gpu::shaders::random::pcg_hash;
 
 // Only the first field of Bevy's `View` uniform; the rest of the binding is ignored.
@@ -30,6 +30,8 @@ const PLAYBACK_RANDOM: u32 = 2u;
 @group(0) @binding(2) var<uniform> settings: RenderParams;
 @group(0) @binding(3) var image: texture_2d<f32>;
 @group(0) @binding(4) var image_sampler: sampler;
+// Slots of the live particles; see live.wesl.
+@group(0) @binding(5) var<storage, read> live: array<u32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -49,15 +51,10 @@ fn vertex(
         vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0),
     );
     let corner = corners[vertex_index];
-    let p = particles[instance_index];
+    let slot = live[instance_index];
+    let p = particles[slot];
 
     var out: VertexOutput;
-    // Every slot is drawn; dead ones collapse to a degenerate point and are clipped.
-    if !is_alive(p) {
-        out.clip_position = vec4(0.0);
-        return out;
-    }
-
     var offset = corner * p.radius;
     let speed = length(p.velocity);
     if settings.stretch > 0.0 && speed > 0.0 {
@@ -70,7 +67,7 @@ fn vertex(
     out.local = corner;
     out.color = p.color;
 
-    let frame = texture_frame(p, instance_index);
+    let frame = texture_frame(p, slot);
     let cell = vec2(f32(frame % settings.columns), f32(frame / settings.columns));
     let within = vec2(corner.x, -corner.y) * 0.5 + 0.5;
     out.uv = (cell + within) / vec2(f32(settings.columns), f32(settings.rows));

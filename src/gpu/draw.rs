@@ -35,6 +35,7 @@ use bevy::{
     },
 };
 
+use super::compute::SpaceGpus;
 use crate::{
     render::{BlendMode, GpuRenderParams},
     space::SpaceUploads,
@@ -139,6 +140,8 @@ fn init_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
                 uniform_buffer::<GpuRenderParams>(false),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
+                // live list
+                storage_buffer_read_only_sized(false, None),
             ),
         ),
     );
@@ -197,9 +200,8 @@ struct SpaceDraws(EntityHashMap<SpaceDraw>);
 #[derive(Default)]
 struct SpaceDraw {
     params: UniformBuffer<GpuRenderParams>,
-    /// `None` until everything it binds is ready.
-    bind_group: Option<BindGroup>,
-    capacity: u32,
+    /// The bind group and draw arguments. `None` until everything they need is ready.
+    ready: Option<(BindGroup, Buffer)>,
 }
 
 fn prepare_space_draws(
@@ -209,6 +211,7 @@ fn prepare_space_draws(
     queue: Res<RenderQueue>,
     view_uniforms: Res<ViewUniforms>,
     spaces: Res<SpaceUploads>,
+    space_gpus: Res<SpaceGpus>,
     buffers: Res<RenderAssets<GpuShaderBuffer>>,
     images: Res<RenderAssets<GpuImage>>,
     fallback: Res<FallbackImage>,
@@ -218,7 +221,6 @@ fn prepare_space_draws(
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
     for space in &spaces.0 {
         let draw = draws.0.entry(space.entity).or_default();
-        draw.capacity = space.buffers.capacity;
         draw.params.set(space.render.to_gpu(space.z));
         draw.params.write_buffer(&device, &queue);
 
@@ -226,14 +228,15 @@ fn prepare_space_draws(
             Some(texture) => images.get(&texture.image),
             None => Some(&fallback.d2),
         };
-        draw.bind_group = match (
+        draw.ready = match (
             view_uniforms.uniforms.binding(),
             buffers.get(&space.buffers.particles),
             draw.params.binding(),
             image,
+            space_gpus.0.get(&space.buffers.id()),
         ) {
-            (Some(view), Some(particles), Some(params), Some(image)) => {
-                Some(device.create_bind_group(
+            (Some(view), Some(particles), Some(params), Some(image), Some(gpu)) => {
+                let bind_group = device.create_bind_group(
                     "particle_draw_bind_group",
                     &layout,
                     &BindGroupEntries::sequential((
@@ -242,8 +245,10 @@ fn prepare_space_draws(
                         params,
                         &image.texture_view,
                         &image.sampler,
+                        gpu.live.list.as_entire_binding(),
                     )),
-                ))
+                );
+                Some((bind_group, gpu.live.draw_args.clone()))
             }
             _ => None,
         };
@@ -267,11 +272,11 @@ impl<P: PhaseItem> RenderCommand<P> for DrawSpaceParticles {
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let draw = draws.into_inner().0.get(&item.main_entity().id());
-        let Some((draw, bind_group)) = draw.and_then(|d| Some((d, d.bind_group.as_ref()?))) else {
+        let Some((bind_group, draw_args)) = draw.and_then(|draw| draw.ready.as_ref()) else {
             return RenderCommandResult::Skip;
         };
         pass.set_bind_group(0, bind_group, &[view_offset.offset]);
-        pass.draw(0..6, 0..draw.capacity);
+        pass.draw_indirect(draw_args, 0);
         RenderCommandResult::Success
     }
 }

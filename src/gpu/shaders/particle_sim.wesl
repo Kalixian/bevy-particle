@@ -26,8 +26,10 @@ struct Emitter {
     blue: vec2<f32>,
     alpha: vec2<f32>,
     mass_per_radius: f32,
-    spawn_offset: u32,
-    spawn_count: u32,
+    // Not about this emitter: entry i of the spawn table is kept in array element i, to save a
+    // binding. Entries are sorted by first request number, and cover all spaces.
+    table_first: u32,
+    table_emitter: u32,
     enabled: u32,
     // Particles of other generations belonged to an earlier emitter in this slot.
     generation: u32,
@@ -279,16 +281,18 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let request = params.spawn_first + id.x;
 
-    // Find the emitter that owns this request (the array has every space's emitters, but
-    // request numbers are unique). Linear scan: fine for a handful of emitters.
-    var e = 0u;
-    for (var k = 0u; k < params.emitter_count; k++) {
-        let em = emitters[k];
-        if request >= em.spawn_offset && request < em.spawn_offset + em.spawn_count {
-            e = k;
-            break;
+    // Find the emitter that owns this request: the last table entry starting at or before it.
+    var lo = 0u;
+    var hi = params.spawn_table_len;
+    while hi - lo > 1u {
+        let mid = (lo + hi) / 2u;
+        if emitters[mid].table_first <= request {
+            lo = mid;
+        } else {
+            hi = mid;
         }
     }
+    let e = emitters[lo].table_emitter;
     let em = emitters[e];
 
     // Pop a free slot. Nothing pushes during this pass, so `count` only falls: if the value

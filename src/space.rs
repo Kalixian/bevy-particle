@@ -2,7 +2,10 @@ use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::{RenderLayers, VisibilitySystems},
     prelude::*,
-    render::{extract_resource::ExtractResource, render_resource::ShaderType, storage::ShaderBuffer},
+    render::{
+        extract_resource::ExtractResource, render_resource::ShaderType, renderer::RenderDevice,
+        storage::ShaderBuffer,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +52,9 @@ impl Plugin for SpacePlugin {
 #[serde(deny_unknown_fields)]
 #[require(Transform, Visibility, SpaceState)]
 pub struct ParticleSpace {
-    /// Maximum number of live particles; must be above 0. Fixed once the space is created.
+    /// Maximum number of live particles; must be above 0. Lowered, with a warning, if it's more
+    /// than the GPU supports: about 2 million on devices with WebGPU's default limits. Fixed once
+    /// the space is created.
     pub capacity: u32,
 }
 
@@ -70,7 +75,8 @@ pub struct SimParams {
     pub spawn_first: u32,
     /// Number of spawn requests this frame (spawn-pass threads).
     pub spawn_total: u32,
-    pub emitter_count: u32,
+    /// Length of the spawn table, which covers all spaces.
+    pub spawn_table_len: u32,
     /// Changes every frame; seeds the GPU random numbers.
     pub frame: u32,
     /// The space's slice of the modifier array; see `ModifierUpload::push`.
@@ -109,6 +115,14 @@ pub struct SpaceUpload {
     pub layers: RenderLayers,
 }
 
+/// The most particles a space can have with buffers of at most `buffer_size` bytes and dispatches
+/// of at most `workgroups` (of 256 slots).
+fn max_capacity(buffer_size: u64, workgroups: u32) -> u32 {
+    // The particles are the largest buffer.
+    let particles = buffer_size / size_of::<GpuParticle>() as u64;
+    particles.min(workgroups as u64 * 256).min(u32::MAX as u64) as u32
+}
+
 /// Creates buffers for new spaces and drops those of spaces whose component was removed.
 /// (Despawned spaces take theirs with them.)
 fn sync_space_buffers(
@@ -116,6 +130,7 @@ fn sync_space_buffers(
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     added: Query<(Entity, &ParticleSpace), Added<ParticleSpace>>,
     mut removed: RemovedComponents<ParticleSpace>,
+    device: Option<Res<RenderDevice>>,
 ) {
     for entity in removed.read() {
         if let Ok(mut entity) = commands.get_entity(entity) {
@@ -124,10 +139,21 @@ fn sync_space_buffers(
     }
 
     for (entity, space) in &added {
-        let capacity = space.capacity;
+        let mut capacity = space.capacity;
         if capacity == 0 {
             warn!("ParticleSpace {entity} has capacity 0; ignoring it");
             continue;
+        }
+        if let Some(device) = &device {
+            let limits = device.limits();
+            let max = max_capacity(
+                limits.max_storage_buffer_binding_size.min(limits.max_buffer_size),
+                limits.max_compute_workgroups_per_dimension,
+            );
+            if capacity > max {
+                warn!("This GPU fits {max} particles per space; ParticleSpace {entity} asked for {capacity}");
+                capacity = max;
+            }
         }
         info!("Allocating {capacity} particle slots");
 
@@ -183,14 +209,15 @@ fn prepare_space_uploads(
         if sim_ready.is_simulating(buffers.id()) {
             state.age += time.delta_secs();
         }
-        let spawns = emitters.spawn_ranges.get(&entity).copied().unwrap_or_default();
+        let spawns = emitters.spawns.ranges.get(&entity).copied().unwrap_or_default();
 
         let params = SimParams {
             dt: time.delta_secs(),
             capacity: buffers.capacity,
             spawn_first: spawns.first,
-            spawn_total: spawns.count,
-            emitter_count: emitters.emitters.len() as u32,
+            // More could never fit.
+            spawn_total: spawns.count.min(buffers.capacity),
+            spawn_table_len: emitters.spawns.len(),
             frame: *frame,
             modifiers,
             gravity_enabled: gravity.is_some() as u32,
@@ -305,5 +332,23 @@ mod tests {
         assert_eq!(uploads(&app), [(20, 0)]);
         let id = app.world().get::<ParticleBuffers>(entity).unwrap().id();
         assert!(!app.world().resource::<GpuSimReady>().is_simulating(id));
+    }
+
+    #[test]
+    fn capacity_is_limited_by_buffer_size_and_dispatch_size() {
+        // WebGPU's defaults.
+        assert_eq!(max_capacity(128 << 20, 65535), 2 << 20);
+        assert_eq!(max_capacity(u64::MAX, 65535), 65535 * 256);
+    }
+
+    #[test]
+    fn spawns_never_exceed_capacity() {
+        let mut app = app();
+        let burst = || ParticleEmitter { burst_count: u32::MAX, rate: 1e6, ..default() };
+        app.world_mut().spawn((space(10), children![burst(), burst()]));
+        app.update();
+        simulate_all(&mut app);
+        app.update();
+        assert_eq!(uploads(&app), [(10, 10)]);
     }
 }

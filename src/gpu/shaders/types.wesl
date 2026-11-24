@@ -24,7 +24,8 @@ struct SimParams {
     // The space's spawn requests are numbered from `spawn_first`.
     spawn_first: u32,
     spawn_total: u32,
-    emitter_count: u32,
+    // Length of the spawn table (see `Emitter` in particle_sim.wesl).
+    spawn_table_len: u32,
     frame: u32,
     // Where the space's forces, constraints and appearance modifiers start, and the end.
     modifiers: vec4<u32>,

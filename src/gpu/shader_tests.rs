@@ -37,9 +37,12 @@ macro_rules! shaders {
 const SHADERS: &[(&str, &str)] = shaders![
     "types",
     "random",
+    "scan",
     "tracks",
     "particle_sim",
     "particle_draw",
+    "live",
+    "gravity_args",
     "gravity_brute",
     "gravity_bh",
 ];
@@ -124,6 +127,8 @@ fn shaders_compile_and_validate() {
         let expected: &[&str] = match *name {
             "particle_sim" => &["compact", "integrate", "spawn"],
             "particle_draw" => &["vertex", "fragment"],
+            "live" => &["mark", "scan_blocks", "scan_sums", "write"],
+            "gravity_args" => &["size_gravity"],
             "gravity_brute" => &["gravity"],
             "gravity_bh" => &[
                 "bounds_pass",
@@ -150,7 +155,7 @@ fn struct_layouts_match() {
     check_layout::<GpuTrackRecord, _>("particle_sim", "TrackRecord");
     check_layout::<GpuRenderParams, _>("particle_draw", "RenderParams");
     check_layout::<RadixPassParams, _>("gravity_bh", "RadixPass");
-    for shader in ["particle_sim", "gravity_brute", "gravity_bh"] {
+    for shader in ["particle_sim", "live", "gravity_args", "gravity_brute", "gravity_bh"] {
         check_layout::<SimParams, _>(shader, "SimParams");
     }
 }
@@ -169,7 +174,7 @@ fn particle_layout_matches() {
         position, velocity, color, mass, radius, age, lifetime, emitter, base_radius, base_color
     );
     let rust = (fields, size_of::<GpuParticle>() as u64);
-    for shader in ["particle_sim", "particle_draw"] {
+    for shader in ["particle_sim", "particle_draw", "live"] {
         assert_eq!(rust, shader_layout(&compile(shader), "Particle"), "{shader}");
     }
 }
@@ -194,11 +199,12 @@ fn shared_constants_match() {
 
 #[test]
 fn workgroup_sizes_match() {
-    for shader in ["particle_sim", "gravity_brute", "gravity_bh"] {
+    for shader in ["particle_sim", "live", "gravity_args", "gravity_brute", "gravity_bh"] {
         for entry in &compile(shader).entry_points {
-            let expected = match entry.name.as_str() {
-                "force" => super::gravity::FORCE_WORKGROUP_SIZE,
-                _ if shader == "particle_sim" => super::compute::WORKGROUP_SIZE,
+            let expected = match shader {
+                "particle_sim" => super::compute::WORKGROUP_SIZE,
+                "live" => super::live::WORKGROUP_SIZE,
+                "gravity_args" => 1,
                 _ => super::gravity::WORKGROUP_SIZE,
             };
             assert_eq!(entry.workgroup_size, [expected, 1, 1], "{shader}/{}", entry.name);

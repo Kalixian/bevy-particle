@@ -172,10 +172,10 @@ pub struct GpuEmitter {
     pub blue: Vec2,
     pub alpha: Vec2,
     pub mass_per_radius: f32,
-    /// This emitter's spawn requests are `spawn_offset .. spawn_offset + spawn_count`,
-    /// numbered across all spaces.
-    pub spawn_offset: u32,
-    pub spawn_count: u32,
+    /// Entry i of the spawn table (see [`SpawnTable`]) is kept in array element i, to save a
+    /// binding; it isn't about this emitter.
+    pub table_first: u32,
+    pub table_emitter: u32,
     /// 0 for despawned emitters; their particles are killed.
     pub enabled: u32,
     /// The slot's generation; particles of any other generation are killed.
@@ -203,8 +203,16 @@ pub struct EmitterUpload {
     pub emitters: Vec<GpuEmitter>,
     /// Lookup tables for the emitters' non-uniform `Spread`s.
     curves: Vec<GpuCurve>,
-    /// Each space's spawn requests. Spaces without any are left out.
-    pub spawn_ranges: EntityHashMap<SpawnRange>,
+    pub spawns: SpawnTable,
+}
+
+/// This frame's spawn requests. They're numbered so that each space's are contiguous.
+#[derive(Clone, Default)]
+pub struct SpawnTable {
+    /// Spaces without requests are left out.
+    pub ranges: EntityHashMap<SpawnRange>,
+    /// (first request, emitter slot) for each spawning emitter, in request order.
+    entries: Vec<(u32, u32)>,
 }
 
 /// A space's spawn requests: `first .. first + count`.
@@ -214,31 +222,31 @@ pub struct SpawnRange {
     pub count: u32,
 }
 
-/// Numbers the spawn requests so that each space's are contiguous. `spaces` holds the space
-/// each emitter spawns into.
-fn assign_spawn_ranges(
-    emitters: &mut [GpuEmitter],
-    spaces: &[Option<Entity>],
-) -> EntityHashMap<SpawnRange> {
-    let mut ranges = EntityHashMap::<SpawnRange>::default();
-    for (emitter, space) in emitters.iter().zip(spaces) {
-        if let Some(space) = space && emitter.spawn_count > 0 {
-            ranges.entry(*space).or_default().count += emitter.spawn_count;
+impl SpawnTable {
+    /// `emitters` holds the space each emitter spawns into, and how many particles.
+    fn new(emitters: &[(Option<Entity>, u32)]) -> Self {
+        let mut by_space = EntityHashMap::<Vec<(u32, u32)>>::default();
+        for (slot, (space, count)) in emitters.iter().enumerate() {
+            if let Some(space) = space && *count > 0 {
+                by_space.entry(*space).or_default().push((slot as u32, *count));
+            }
         }
-    }
-    let mut first = 0;
-    for range in ranges.values_mut() {
-        range.first = first;
-        first += range.count;
-    }
-    let mut next: EntityHashMap<u32> = ranges.iter().map(|(e, r)| (*e, r.first)).collect();
-    for (emitter, space) in emitters.iter_mut().zip(spaces) {
-        if let Some(next) = space.and_then(|space| next.get_mut(&space)) {
-            emitter.spawn_offset = *next;
-            *next += emitter.spawn_count;
+        let mut table = Self::default();
+        let mut next = 0u32;
+        for (space, emitters) in by_space {
+            let first = next;
+            for (slot, count) in emitters {
+                table.entries.push((next, slot));
+                next = next.saturating_add(count);
+            }
+            table.ranges.insert(space, SpawnRange { first, count: next - first });
         }
+        table
     }
-    ranges
+
+    pub fn len(&self) -> u32 {
+        self.entries.len() as u32
+    }
 }
 
 impl EmitterUpload {
@@ -285,7 +293,8 @@ fn prepare_emitter_upload(
     mut upload: ResMut<EmitterUpload>,
     mut modifier_upload: ResMut<ModifierUpload>,
 ) {
-    let mut emitter_spaces = Vec::with_capacity(registry.slots.len());
+    // The space and spawn count of each slot.
+    let mut spawns = Vec::with_capacity(registry.slots.len());
 
     upload.emitters.clear();
     upload.curves.clear();
@@ -294,7 +303,7 @@ fn prepare_emitter_upload(
             slot.entity.and_then(|e| Some((e, emitters.get_mut(e).ok()?)))
         else {
             upload.emitters.push(GpuEmitter::default());
-            emitter_spaces.push(None);
+            spawns.push((None, 0));
             continue;
         };
 
@@ -303,12 +312,12 @@ fn prepare_emitter_upload(
             warn!("Emitter {entity} has no ParticleSpace among its ancestors");
             state.warned_no_space = true;
         }
-        emitter_spaces.push(space);
         // Hold spawns (bursts included) until the GPU is actually simulating the space. Before
         // that (pipelines compiling, buffers not created yet) they'd be lost.
-        let can_burst = space
+        let buffers = space
             .and_then(|space| spaces.get(space).ok())
-            .is_some_and(|buffers| sim_ready.is_simulating(buffers.id()));
+            .filter(|buffers| sim_ready.is_simulating(buffers.id()));
+        let can_burst = buffers.is_some();
         let dt = if can_burst { time.delta_secs() } else { 0.0 };
 
         state.accumulator += emitter.rate.max(0.0) * dt;
@@ -316,8 +325,11 @@ fn prepare_emitter_upload(
         state.accumulator -= spawn_count as f32;
         if can_burst && !state.burst_done {
             state.burst_done = true;
-            spawn_count += emitter.burst_count;
+            spawn_count = spawn_count.saturating_add(emitter.burst_count);
         }
+        // More could never fit.
+        spawn_count = spawn_count.min(buffers.map_or(0, |buffers| buffers.capacity));
+        spawns.push((space, spawn_count));
 
         let position = transform.translation().truncate();
         let modifiers = modifier_upload.push(modifiers, attractor, position, state.age);
@@ -348,9 +360,9 @@ fn prepare_emitter_upload(
             blue,
             alpha,
             mass_per_radius: emitter.mass_per_radius,
-            // Set by `assign_spawn_ranges`.
-            spawn_offset: 0,
-            spawn_count,
+            // The spawn table is filled in below.
+            table_first: 0,
+            table_emitter: 0,
             enabled: 1,
             generation: slot.generation.into(),
             modifiers,
@@ -367,7 +379,10 @@ fn prepare_emitter_upload(
     }
 
     let upload = &mut *upload;
-    upload.spawn_ranges = assign_spawn_ranges(&mut upload.emitters, &emitter_spaces);
+    upload.spawns = SpawnTable::new(&spawns);
+    for (emitter, entry) in upload.emitters.iter_mut().zip(&upload.spawns.entries) {
+        (emitter.table_first, emitter.table_emitter) = *entry;
+    }
     if upload.emitters.is_empty() {
         upload.emitters.push(GpuEmitter::default());
     }
@@ -401,21 +416,25 @@ mod tests {
     fn spawn_requests_are_contiguous_per_space() {
         let mut world = World::new();
         let [a, b, idle] = std::array::from_fn(|_| world.spawn_empty().id());
-        let mut emitters = [3, 5, 2, 0, 7].map(|spawn_count| GpuEmitter {
-            spawn_count,
-            ..default()
-        });
-        let spaces = [Some(a), Some(b), Some(a), Some(idle), Some(b)];
-        let ranges = assign_spawn_ranges(&mut emitters, &spaces);
-
-        assert_eq!((ranges[&a].count, ranges[&b].count, ranges.len()), (5, 12, 2));
-        let mut firsts = [(ranges[&a].first, 5), (ranges[&b].first, 12)];
-        firsts.sort();
-        assert_eq!((firsts[0].0, firsts[1].0), (0, firsts[0].1));
-        // Within a space, emitters follow each other.
-        let offset = |i: usize| emitters[i].spawn_offset;
-        assert_eq!((offset(0), offset(2)), (ranges[&a].first, ranges[&a].first + 3));
-        assert_eq!((offset(1), offset(4)), (ranges[&b].first, ranges[&b].first + 5));
+        let table = SpawnTable::new(&[
+            (Some(a), 3),
+            (Some(b), 5),
+            (Some(a), 2),
+            (Some(idle), 0),
+            (None, 9),
+            (Some(b), 7),
+        ]);
+        let (range_a, range_b) = (table.ranges[&a], table.ranges[&b]);
+        assert_eq!((range_a.count, range_b.count, table.ranges.len()), (5, 12, 2));
+        // One range follows the other.
+        assert!(
+            (range_a.first, range_b.first) == (0, 5) || (range_b.first, range_a.first) == (0, 12)
+        );
+        let first = |slot| table.entries.iter().find(|(_, s)| *s == slot).unwrap().0;
+        assert_eq!((first(0), first(2)), (range_a.first, range_a.first + 3));
+        assert_eq!((first(1), first(5)), (range_b.first, range_b.first + 5));
+        // Sorted, for the GPU's binary search.
+        assert!(table.entries.is_sorted() && table.len() == 4);
     }
 
     #[test]

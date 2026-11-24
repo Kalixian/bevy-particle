@@ -4,6 +4,7 @@
 mod compute;
 mod draw;
 mod gravity;
+mod live;
 #[cfg(test)]
 mod shader_tests;
 
@@ -30,12 +31,15 @@ impl Plugin for ParticleGpuPlugin {
         // web). List every shader in `shader_tests.rs` too.
         load_shader_library!(app, "shaders/types.wesl");
         load_shader_library!(app, "shaders/random.wesl");
+        load_shader_library!(app, "shaders/scan.wesl");
         load_shader_library!(app, "shaders/tracks.wesl");
         let kinds = Shader::from_wesl(modifier_kinds::wesl_source(), modifier_kinds::WESL_PATH);
         let kinds = app.world_mut().resource_mut::<Assets<Shader>>().add(kinds);
         app.insert_resource(GeneratedShaders { _modifier_kinds: kinds });
         embedded_asset!(app, "shaders/particle_sim.wesl");
         embedded_asset!(app, "shaders/particle_draw.wesl");
+        embedded_asset!(app, "shaders/live.wesl");
+        embedded_asset!(app, "shaders/gravity_args.wesl");
         embedded_asset!(app, "shaders/gravity_brute.wesl");
         embedded_asset!(app, "shaders/gravity_bh.wesl");
 
@@ -54,6 +58,7 @@ impl Plugin for ParticleGpuPlugin {
         };
         render_app.insert_resource(ready);
         gravity::build(render_app);
+        live::build(render_app);
         compute::build(render_app);
         draw::build(render_app);
     }

@@ -10,10 +10,11 @@
 //   summarize          bottom-up mass and center of mass per internal node
 //   force              each body walks the tree; nodes with size/distance < θ count as one mass
 //
-// The body count n is only known on the GPU (written by `compact`), so every pass is
-// dispatched for the maximum M and threads past n do nothing.
+// The body count n is only known on the GPU (written by `compact`); `gravity_args.wesl` sizes
+// the dispatches from it. Threads past n, in the last workgroup, do nothing.
 
 import package::gpu::shaders::types::SimParams;
+import package::gpu::shaders::scan::scan_exclusive;
 
 // Must match `RadixPassParams` in src/gpu/gravity.rs. Bound with a dynamic offset per pass.
 struct RadixPass {
@@ -36,8 +37,6 @@ const WG: u32 = 256u;
 const LEAF: u32 = 0x80000000u;
 const NONE: u32 = 0xFFFFFFFFu;
 const STACK_SIZE: u32 = 32u;
-// Workgroup size of `force`; must match FORCE_WORKGROUP_SIZE in src/gpu/gravity.rs.
-const FORCE_WG: u32 = 256u;
 
 @group(0) @binding(0) var<uniform> params: SimParams;
 @group(0) @binding(1) var<uniform> radix: RadixPass;
@@ -71,7 +70,6 @@ const FORCE_WG: u32 = 256u;
 var<workgroup> wg_n: u32;
 var<workgroup> wg_bounds: array<atomic<u32>, 4>;
 var<workgroup> wg_hist: array<atomic<u32>, 16>;
-var<workgroup> wg_scan: array<u32, WG>;
 var<workgroup> wg_masks: array<atomic<u32>, 128>; // 16 digits × 8 words of 32 lanes
 
 // --- shared helpers ---------------------------------------------------------------------
@@ -89,9 +87,9 @@ fn uniform_body_total(lid: u32) -> u32 {
     return workgroupUniformLoad(&wg_n);
 }
 
-// Number of 256-body tiles for the maximum body count.
+// Number of 256-body tiles.
 fn tiles() -> u32 {
-    return (params.gravity_max_bodies + WG - 1u) / WG;
+    return (body_total() + WG - 1u) / WG;
 }
 
 // Maps f32 to u32 so that unsigned order matches float order.
@@ -110,22 +108,6 @@ fn domain() -> vec3<f32> {
     let hi = vec2(unordered(atomicLoad(&bounds[2])), unordered(atomicLoad(&bounds[3])));
     let side = max(max(hi.x - lo.x, hi.y - lo.y), 1e-3) * 1.0001;
     return vec3(lo, side);
-}
-
-// Exclusive prefix sum across the workgroup (Hillis-Steele). Returns (exclusive, total).
-fn scan_exclusive(lid: u32, v: u32) -> vec2<u32> {
-    wg_scan[lid] = v;
-    workgroupBarrier();
-    for (var offset = 1u; offset < WG; offset <<= 1u) {
-        var t = 0u;
-        if lid >= offset {
-            t = wg_scan[lid - offset];
-        }
-        workgroupBarrier();
-        wg_scan[lid] += t;
-        workgroupBarrier();
-    }
-    return vec2(wg_scan[lid] - v, wg_scan[WG - 1u]);
 }
 
 // --- 1. bounds --------------------------------------------------------------------------
@@ -425,7 +407,7 @@ fn pull(p: vec2<f32>, q: vec2<f32>, m: f32) -> vec2<f32> {
 }
 
 // Threads go in sorted (Morton) order, so neighboring threads walk similar paths.
-@compute @workgroup_size(FORCE_WG)
+@compute @workgroup_size(256)
 fn force(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = body_total();
     let s = gid.x;
