@@ -17,7 +17,13 @@ import package::gpu::shaders::tracks::{tracks, sample_track, CLOCK_SECONDS};
 // shaped by its `*_curve` (see `sample_spread`).
 struct Emitter {
     position: vec2<f32>,
-    spawn_half_extents: vec2<f32>,
+    // Its x axis, then its y axis, in the world; as long as its scale.
+    axes: vec4<f32>,
+    // What these hold depends on `area_kind`; see `sample_area`.
+    area: vec4<f32>,
+    area_curves: vec2<u32>,
+    area_kind: u32,
+    direction: u32,
     speed: vec2<f32>,
     angle: vec2<f32>,
     radius: vec2<f32>,
@@ -58,6 +64,18 @@ const NO_CURVE: u32 = 0xFFFFFFFFu;
 struct Curve {
     samples: array<vec4<f32>, 8>,
 }
+
+// Must match src/area.rs. (Any other kind is a point.)
+const AREA_RECT: u32 = 1u;
+const AREA_RECT_EDGE: u32 = 2u;
+const AREA_ELLIPSE: u32 = 3u;
+const AREA_ELLIPSE_EDGE: u32 = 4u;
+const AREA_RING: u32 = 5u;
+const AREA_LINE: u32 = 6u;
+
+// Must match `SpawnDirection` in src/area.rs. (Any other is fixed.)
+const DIRECTION_OUTWARD: u32 = 1u;
+const DIRECTION_NORMAL: u32 = 2u;
 
 const TAU: f32 = 6.2831853;
 
@@ -318,8 +336,10 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var rng = pcg_hash(request ^ pcg_hash(params.frame));
 
-    let offset = (vec2(rand(&rng), rand(&rng)) * 2.0 - 1.0) * em.spawn_half_extents;
-    let direction = sample_spread(em.angle, em.angle_curve, &rng);
+    let start = sample_area(em, &rng);
+    let offset = em.axes.xy * start.position.x + em.axes.zw * start.position.y;
+    let angle = sample_spread(em.angle, em.angle_curve, &rng);
+    let direction = start_direction(em, offset, start.normal, angle);
     let speed = sample_spread(em.speed, em.speed_curve, &rng);
     let radius = sample_spread(em.radius, em.radius_curve, &rng);
     var lifetime = -1.0;
@@ -338,7 +358,7 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var p: Particle;
     p.position = em.position + offset;
-    p.velocity = vec2(cos(direction), sin(direction)) * speed;
+    p.velocity = direction * speed;
     p.color = pack_color(vec4(srgb_to_linear(srgb), alpha));
     p.mass = radius * em.mass_per_radius;
     p.radius = radius;
@@ -354,6 +374,110 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     apply_appearances(&p, params.modifiers);
     apply_appearances(&p, em.modifiers);
     particles[slot] = p;
+}
+
+// --- spawn areas ---
+
+// Both in the emitter's own frame. The normal can have any length, even zero.
+struct Start {
+    position: vec2<f32>,
+    normal: vec2<f32>,
+}
+
+// Where in its area an emitter's next particle starts. Outlines are covered evenly as they
+// appear in the world, where the emitter's scale may have stretched them.
+fn sample_area(em: Emitter, rng: ptr<function, u32>) -> Start {
+    let size = em.area.xy;
+    switch em.area_kind {
+        case AREA_RECT: {
+            let position = (vec2(rand(rng), rand(rng)) * 2.0 - 1.0) * size;
+            return Start(position, rect_normal(em, position));
+        }
+        case AREA_RECT_EDGE: {
+            var position = (vec2(rand(rng), rand(rng)) * 2.0 - 1.0) * size;
+            let width = length(em.axes.xy) * size.x;
+            let height = length(em.axes.zw) * size.y;
+            let end = select(-1.0, 1.0, rand(rng) < 0.5);
+            if rand(rng) * (width + height) < width {
+                position.y = end * size.y;
+                return Start(position, vec2(0.0, end));
+            }
+            position.x = end * size.x;
+            return Start(position, vec2(end, 0.0));
+        }
+        case AREA_ELLIPSE: {
+            let distance = sqrt(rand(rng));
+            let unit = unit_vector(rand(rng) * TAU);
+            return Start(unit * size * distance, unit * size.yx);
+        }
+        case AREA_ELLIPSE_EDGE: {
+            // Equal steps of angle cover unequal lengths of outline, so keep each candidate with
+            // a probability that's proportional to the length.
+            let x = em.axes.xy * size.x;
+            let y = em.axes.zw * size.y;
+            let longest = sqrt(dot(x, x) + dot(y, y));
+            var unit = vec2(1.0, 0.0);
+            // At least 63% are kept, so running out is next to impossible.
+            for (var attempt = 0u; attempt < 16u; attempt++) {
+                unit = unit_vector(rand(rng) * TAU);
+                if rand(rng) * longest <= length(y * unit.x - x * unit.y) {
+                    break;
+                }
+            }
+            return Start(unit * size, unit * size.yx);
+        }
+        case AREA_RING: {
+            let distance = sqrt(sample_spread(em.area.xy, em.area_curves.x, rng));
+            let unit = unit_vector(sample_spread(em.area.zw, em.area_curves.y, rng));
+            return Start(unit * distance, unit);
+        }
+        case AREA_LINE: {
+            let along = em.area.zw - em.area.xy;
+            return Start(em.area.xy + along * rand(rng), vec2(-along.y, along.x));
+        }
+        default: {
+            return Start(vec2(0.0), vec2(0.0));
+        }
+    }
+}
+
+// Of the side that's nearest in the world. (Any shear would scale both distances alike.)
+fn rect_normal(em: Emitter, position: vec2<f32>) -> vec2<f32> {
+    let inside = (em.area.xy - abs(position)) * vec2(length(em.axes.xy), length(em.axes.zw));
+    let outward = select(vec2(-1.0), vec2(1.0), position >= vec2(0.0));
+    return select(vec2(0.0, outward.y), vec2(outward.x, 0.0), inside.x < inside.y);
+}
+
+// The unit vector a particle sets off along. `offset` is from the emitter, in the world.
+fn start_direction(em: Emitter, offset: vec2<f32>, normal: vec2<f32>, angle: f32) -> vec2<f32> {
+    let x = em.axes.xy;
+    let y = em.axes.zw;
+    // Negative if the emitter is mirrored, which mirrors angles.
+    let handedness = select(1.0, -1.0, x.x * y.y - x.y * y.x < 0.0);
+
+    var forward = normalize_or(x, vec2(1.0, 0.0));
+    if em.direction == DIRECTION_OUTWARD || em.direction == DIRECTION_NORMAL {
+        // Normals don't transform like positions: they must stay perpendicular.
+        let turned = (vec2(y.y, -y.x) * normal.x + vec2(-x.y, x.x) * normal.y) * handedness;
+        forward = normalize_or(turned, forward);
+    }
+    if em.direction == DIRECTION_OUTWARD {
+        forward = normalize_or(offset, forward);
+    }
+    let left = vec2(-forward.y, forward.x) * handedness;
+    return forward * cos(angle) + left * sin(angle);
+}
+
+fn normalize_or(v: vec2<f32>, fallback: vec2<f32>) -> vec2<f32> {
+    let len = length(v);
+    if len > 0.0 {
+        return v / len;
+    }
+    return fallback;
+}
+
+fn unit_vector(angle: f32) -> vec2<f32> {
+    return vec2(cos(angle), sin(angle));
 }
 
 // --- helpers ---

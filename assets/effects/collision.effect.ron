@@ -19,7 +19,7 @@
         (position: (-330.0, 70.0), source: Inline((
             emitter: (
                 burst_count: 45000, rate: 0.0, lifetime: None,
-                spawn_half_extents: (50.0, 50.0),
+                spawn: Rect(half_extents: (50.0, 50.0)),
                 speed: (from: 0.0, to: 110.0),
                 radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
                 mass_per_radius: 6.0,
@@ -40,7 +40,7 @@
         (position: (-330.0, 70.0), source: Inline((
             emitter: (
                 burst_count: 55000, rate: 0.0, lifetime: None,
-                spawn_half_extents: (95.0, 95.0),
+                spawn: Rect(half_extents: (95.0, 95.0)),
                 speed: (from: 0.0, to: 110.0),
                 radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
                 mass_per_radius: 6.0,
@@ -61,7 +61,7 @@
         (position: (-330.0, 70.0), source: Inline((
             emitter: (
                 burst_count: 50000, rate: 0.0, lifetime: None,
-                spawn_half_extents: (150.0, 150.0),
+                spawn: Rect(half_extents: (150.0, 150.0)),
                 speed: (from: 0.0, to: 110.0),
                 radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
                 mass_per_radius: 6.0,
@@ -82,7 +82,7 @@
         (position: (330.0, -70.0), source: Inline((
             emitter: (
                 burst_count: 45000, rate: 0.0, lifetime: None,
-                spawn_half_extents: (50.0, 50.0),
+                spawn: Rect(half_extents: (50.0, 50.0)),
                 speed: (from: 0.0, to: 110.0),
                 radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
                 mass_per_radius: 6.0,
@@ -103,7 +103,7 @@
         (position: (330.0, -70.0), source: Inline((
             emitter: (
                 burst_count: 55000, rate: 0.0, lifetime: None,
-                spawn_half_extents: (95.0, 95.0),
+                spawn: Rect(half_extents: (95.0, 95.0)),
                 speed: (from: 0.0, to: 110.0),
                 radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
                 mass_per_radius: 6.0,
@@ -124,7 +124,7 @@
         (position: (330.0, -70.0), source: Inline((
             emitter: (
                 burst_count: 50000, rate: 0.0, lifetime: None,
-                spawn_half_extents: (150.0, 150.0),
+                spawn: Rect(half_extents: (150.0, 150.0)),
                 speed: (from: 0.0, to: 110.0),
                 radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
                 mass_per_radius: 6.0,

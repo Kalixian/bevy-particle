@@ -4,7 +4,7 @@
     emitter: (
         rate: 55000.0,
         lifetime: (from: 5.0, to: 8.0),
-        spawn_half_extents: (10.0, 10.0),
+        spawn: Rect(half_extents: (10.0, 10.0)),
         speed: (from: 50.0, to: 120.0),
         radius: (from: 0.8, to: 1.2),
         alpha: (from: 0.1, to: 0.2),

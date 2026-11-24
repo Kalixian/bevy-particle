@@ -24,6 +24,7 @@
 //! }
 //! ```
 
+mod area;
 mod effect;
 mod emitter;
 mod gpu;
@@ -38,6 +39,7 @@ mod track;
 
 use bevy::prelude::*;
 
+pub use area::{Fill, SpawnArea, SpawnDirection};
 pub use effect::{EffectEmitter, EmitterDef, ParticleEffect};
 pub use emitter::ParticleEmitter;
 pub use gravity::{Gravity, GravityMethod, MAX_GRAVITY_BODIES};

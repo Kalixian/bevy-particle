@@ -6,6 +6,7 @@ use bevy::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    area::{SpawnArea, SpawnDirection},
     gpu::GpuSimReady,
     modifier::{ModifierSystems, ModifierUpload, Modifiers, TargetAttractor},
     particle::ParticleBuffers,
@@ -58,12 +59,15 @@ pub struct ParticleEmitter {
     /// This and the other `Spread` fields are random ranges with a distribution shape:
     /// `(1.0..2.0).into()` is uniform; see [`Spread`] and `Shape` for skewed ones.
     pub lifetime: Option<Spread>,
-    /// Particles spawn uniformly inside this rectangle, centered on the emitter.
-    pub spawn_half_extents: Vec2,
+    /// Where particles spawn. The emitter's `Transform` moves, rotates and scales it.
+    pub spawn: SpawnArea,
     /// Initial speed.
     pub speed: Spread,
-    /// Initial direction in radians (0 = +X, counter-clockwise). `0.0..TAU` = any direction.
+    /// Initial direction in radians, counter-clockwise from `direction`. `0.0..TAU` = any
+    /// direction. An emitter mirrored by a negative scale mirrors it too.
     pub angle: Spread,
+    /// What `angle` is measured from.
+    pub direction: SpawnDirection,
     pub radius: Spread,
     /// Mass = radius × this value.
     pub mass_per_radius: f32,
@@ -92,9 +96,10 @@ impl Default for ParticleEmitter {
             burst_count: 0,
             rate: 100.0,
             lifetime: Some((2.0..4.0).into()),
-            spawn_half_extents: Vec2::ZERO,
+            spawn: SpawnArea::Point,
             speed: (10.0..50.0).into(),
             angle: (0.0..std::f32::consts::TAU).into(),
+            direction: SpawnDirection::Fixed,
             radius: (1.0..2.0).into(),
             mass_per_radius: 1.0,
             red: (1.0..1.0).into(),
@@ -169,7 +174,13 @@ impl EmitterRegistry {
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct GpuEmitter {
     pub position: Vec2,
-    pub spawn_half_extents: Vec2,
+    /// The emitter's x axis, then its y axis, in the world; as long as its scale.
+    pub axes: Vec4,
+    /// See `AreaData`.
+    pub area: Vec4,
+    pub area_curves: UVec2,
+    pub area_kind: u32,
+    pub direction: u32,
     pub speed: Vec2,
     pub angle: Vec2,
     pub radius: Vec2,
@@ -345,10 +356,13 @@ fn prepare_emitter_upload(
         spawns.push((space, spawn_count));
 
         let position = transform.translation().truncate();
+        let matrix = transform.affine().matrix3;
+        let (x_axis, y_axis) = (matrix.x_axis, matrix.y_axis);
         let modifiers = modifier_upload.push(modifiers, attractor, position, state.age);
         state.age += dt;
 
         let curves = &mut upload.curves;
+        let area = emitter.spawn.to_gpu(curves);
         let (speed, speed_curve) = emitter.speed.to_gpu(curves);
         let (angle, angle_curve) = emitter.angle.to_gpu(curves);
         let (radius, radius_curve) = emitter.radius.to_gpu(curves);
@@ -365,7 +379,11 @@ fn prepare_emitter_upload(
 
         upload.emitters.push(GpuEmitter {
             position,
-            spawn_half_extents: emitter.spawn_half_extents,
+            axes: Vec4::new(x_axis.x, x_axis.y, y_axis.x, y_axis.y),
+            area: area.params,
+            area_curves: area.curves,
+            area_kind: area.kind,
+            direction: emitter.direction.id(),
             speed,
             angle,
             radius,

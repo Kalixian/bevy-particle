@@ -46,6 +46,8 @@ pub struct ParticleEffect {
 pub struct EffectEmitter {
     /// Relative to the space.
     pub position: Vec2,
+    /// Radians, counter-clockwise.
+    pub rotation: f32,
     pub def: EmitterDef,
 }
 
@@ -75,10 +77,11 @@ impl ParticleEffect {
         }
         let space = space.id();
 
-        for EffectEmitter { position, def } in &self.emitters {
+        for EffectEmitter { position, rotation, def } in &self.emitters {
             let mut emitter = commands.spawn((
                 ChildOf(space),
-                Transform::from_translation(position.extend(0.0)),
+                Transform::from_translation(position.extend(0.0))
+                    .with_rotation(Quat::from_rotation_z(*rotation)),
                 def.emitter.clone(),
                 def.modifiers.clone(),
             ));
@@ -158,6 +161,8 @@ struct EmitterEntry {
     source: EmitterSource,
     #[serde(default)]
     position: Vec2,
+    #[serde(default)]
+    rotation: f32,
 }
 
 #[derive(Deserialize)]
@@ -194,7 +199,7 @@ impl AssetLoader for EffectLoader {
         let file: EffectFile = parse(&bytes)?;
 
         let mut emitters = Vec::with_capacity(file.emitters.len());
-        for EmitterEntry { source, position } in file.emitters {
+        for EmitterEntry { source, position, rotation } in file.emitters {
             let def = match source {
                 EmitterSource::Inline(def) => *def,
                 EmitterSource::File(path) => {
@@ -204,7 +209,7 @@ impl AssetLoader for EffectLoader {
                     parse(&bytes).map_err(|error| format!("{path}: {error}"))?
                 }
             };
-            emitters.push(EffectEmitter { position, def });
+            emitters.push(EffectEmitter { position, rotation, def });
         }
         Ok(ParticleEffect {
             space: file.space,
@@ -348,8 +353,8 @@ mod tests {
             attractor: None,
             modifiers: default(),
             emitters: vec![
-                EffectEmitter { position: Vec2::X, def: default() },
-                EffectEmitter { position: Vec2::Y, def: default() },
+                EffectEmitter { position: Vec2::X, rotation: 0.0, def: default() },
+                EffectEmitter { position: Vec2::Y, rotation: 0.0, def: default() },
             ],
         };
         let space = effect.spawn(&mut world.commands());

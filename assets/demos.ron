@@ -8,6 +8,11 @@
 //   texture: (path: "sheet.png", columns: 4, rows: 4, playback: Fps(12.0))).
 //   Blends: Alpha, Additive. Playback: OverLife, Fps(..), Random.
 // - Emitter fields left out use `ParticleEmitter::default()`.
+// - An emitter's spawn: Point, Rect(half_extents: (9.0, 9.0)), Ellipse(radii: (9.0, 9.0)),
+//   Ring(radius: (from: 8.0, to: 9.0), arc: (from: 0.0, to: 3.14)) or
+//   Line(from: (0.0, 0.0), to: (9.0, 0.0)). Rect and Ellipse take an optional fill: Edge; Ring's
+//   arc is optional. Its direction (what angle is measured from): Fixed, Outward, Normal.
+// - An effect's emitters can have a position and a rotation (radians).
 // - Random ranges: (from: 0.5, to: 2.0), optionally with shape: Low(3.0), High(3.0),
 //   Middle(3.0) or Falloff(6.0).
 // - Modifier parameters: Constant(value), or
@@ -16,22 +21,23 @@
 //   are optional.
 // - Colors in modifiers are linear RGB; emitter red/green/blue are sRGB.
 (
-    start: "cluster",
+    start: "supernova",
     scenes: [
-        "cloud",
+        "supernova",
         "cluster",
+        "cloud",
         "keyframes",
-        "showcase",
         "stream",
         "embers",
         "rainstorm",
         "petals",
         "shoal",
-        "supernova",
         "rings",
         "confetti",
         "pinwheel",
         "smoke",
         "collision",
+        "areas",
+        "showcase",
     ],
 )

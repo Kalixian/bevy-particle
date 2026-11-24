@@ -1,0 +1,60 @@
+// Spawn areas. Top: a rect's edge and an ellipse's, sprayed along their normals; a disk.
+// Bottom: a ring that implodes, a tilted line, an arc that swirls, and a rotated rect.
+(
+    space: (capacity: 100000),
+    render: (blend: Additive, softness: 1.0),
+    modifiers: [
+        Alpha(Scale, Track((clock: Life, keys: [(time: 0.0, value: 1.0), (time: 1.0, value: 0.0)]))),
+    ],
+    emitters: [
+        (position: (-420.0, 170.0), source: Inline((emitter: (
+            rate: 2500.0, lifetime: (from: 0.8, to: 1.2),
+            spawn: Rect(half_extents: (110.0, 60.0), fill: Edge),
+            direction: Normal, angle: (from: 0.0, to: 0.0), speed: (from: 30.0, to: 50.0),
+            radius: (from: 1.0, to: 2.0),
+            red: (from: 1.0, to: 1.0), green: (from: 0.4, to: 0.4), blue: (from: 0.2, to: 0.2),
+        )))),
+        (position: (0.0, 170.0), source: Inline((emitter: (
+            rate: 2500.0, lifetime: (from: 0.8, to: 1.2),
+            spawn: Ellipse(radii: (130.0, 50.0), fill: Edge),
+            direction: Normal, angle: (from: 0.0, to: 0.0), speed: (from: 30.0, to: 50.0),
+            radius: (from: 1.0, to: 2.0),
+            red: (from: 0.3, to: 0.3), green: (from: 1.0, to: 1.0), blue: (from: 0.5, to: 0.5),
+        )))),
+        (position: (420.0, 170.0), source: Inline((emitter: (
+            rate: 2500.0, lifetime: (from: 0.8, to: 1.2),
+            spawn: Ring(radius: (from: 0.0, to: 90.0)),
+            direction: Outward, angle: (from: 0.0, to: 0.0), speed: (from: 30.0, to: 50.0),
+            radius: (from: 1.0, to: 2.0),
+            red: (from: 0.4, to: 0.4), green: (from: 0.6, to: 0.6), blue: (from: 1.0, to: 1.0),
+        )))),
+        (position: (-460.0, -160.0), source: Inline((emitter: (
+            rate: 2500.0, lifetime: (from: 0.8, to: 1.2),
+            spawn: Ring(radius: (from: 100.0, to: 110.0)),
+            direction: Outward, angle: (from: 3.1416, to: 3.1416), speed: (from: 30.0, to: 50.0),
+            radius: (from: 1.0, to: 2.0),
+            red: (from: 1.0, to: 1.0), green: (from: 0.8, to: 0.8), blue: (from: 0.3, to: 0.3),
+        )))),
+        (position: (-150.0, -160.0), rotation: 0.5, source: Inline((emitter: (
+            rate: 2500.0, lifetime: (from: 0.8, to: 1.2),
+            spawn: Line(from: (-100.0, 0.0), to: (100.0, 0.0)),
+            direction: Normal, angle: (from: 0.0, to: 0.0), speed: (from: 30.0, to: 50.0),
+            radius: (from: 1.0, to: 2.0),
+            red: (from: 0.4, to: 0.4), green: (from: 0.9, to: 0.9), blue: (from: 1.0, to: 1.0),
+        )))),
+        (position: (150.0, -160.0), source: Inline((emitter: (
+            rate: 2500.0, lifetime: (from: 0.8, to: 1.2),
+            spawn: Ring(radius: (from: 80.0, to: 90.0), arc: (from: 0.0, to: 3.1416)),
+            direction: Outward, angle: (from: 1.5708, to: 1.5708), speed: (from: 30.0, to: 50.0),
+            radius: (from: 1.0, to: 2.0),
+            red: (from: 1.0, to: 1.0), green: (from: 0.4, to: 0.4), blue: (from: 0.9, to: 0.9),
+        )))),
+        (position: (460.0, -160.0), rotation: 0.6, source: Inline((emitter: (
+            rate: 2500.0, lifetime: (from: 0.8, to: 1.2),
+            spawn: Rect(half_extents: (90.0, 40.0)),
+            direction: Fixed, angle: (from: 0.0, to: 0.0), speed: (from: 30.0, to: 50.0),
+            radius: (from: 1.0, to: 2.0),
+            red: (from: 0.7, to: 0.7), green: (from: 1.0, to: 1.0), blue: (from: 0.3, to: 0.3),
+        )))),
+    ],
+)

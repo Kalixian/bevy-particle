@@ -14,7 +14,7 @@
         (source: Inline((
             emitter: (
                 rate: 20000.0, lifetime: (from: 4.0, to: 8.0),
-                spawn_half_extents: (66.0, 66.0), speed: (from: 0.0, to: 30.0),
+                spawn: Rect(half_extents: (66.0, 66.0)), speed: (from: 0.0, to: 30.0),
                 radius: (from: 0.4, to: 1.8, shape: Falloff(6.0)),
                 alpha: (from: 0.05, to: 0.16),
             ),
@@ -31,7 +31,7 @@
         (source: Inline((
             emitter: (
                 rate: 35000.0, lifetime: (from: 4.0, to: 8.0),
-                spawn_half_extents: (143.0, 143.0), speed: (from: 0.0, to: 30.0),
+                spawn: Rect(half_extents: (143.0, 143.0)), speed: (from: 0.0, to: 30.0),
                 radius: (from: 0.4, to: 1.8, shape: Falloff(6.0)),
                 alpha: (from: 0.05, to: 0.16),
             ),
@@ -48,7 +48,7 @@
         (source: Inline((
             emitter: (
                 rate: 50000.0, lifetime: (from: 4.0, to: 8.0),
-                spawn_half_extents: (236.5, 236.5), speed: (from: 0.0, to: 30.0),
+                spawn: Rect(half_extents: (236.5, 236.5)), speed: (from: 0.0, to: 30.0),
                 radius: (from: 0.4, to: 1.8, shape: Falloff(6.0)),
                 alpha: (from: 0.05, to: 0.16),
             ),
@@ -65,7 +65,7 @@
         (source: Inline((
             emitter: (
                 rate: 60000.0, lifetime: (from: 4.0, to: 8.0),
-                spawn_half_extents: (335.5, 335.5), speed: (from: 0.0, to: 30.0),
+                spawn: Rect(half_extents: (335.5, 335.5)), speed: (from: 0.0, to: 30.0),
                 radius: (from: 0.4, to: 1.8, shape: Falloff(6.0)),
                 alpha: (from: 0.05, to: 0.16),
             ),

@@ -18,6 +18,7 @@ use naga::{
 
 use super::gravity::RadixPassParams;
 use crate::{
+    area::{self, SpawnDirection},
     emitter::GpuEmitter,
     modifier::GpuModifier,
     modifier_kinds,
@@ -196,6 +197,14 @@ fn shared_constants_match() {
     };
     assert_eq!(constant("CURVE_SAMPLES"), CURVE_SAMPLES as u32);
     assert_eq!(constant("NO_CURVE"), NO_CURVE);
+    assert_eq!(constant("AREA_RECT"), area::AREA_RECT);
+    assert_eq!(constant("AREA_RECT_EDGE"), area::AREA_RECT_EDGE);
+    assert_eq!(constant("AREA_ELLIPSE"), area::AREA_ELLIPSE);
+    assert_eq!(constant("AREA_ELLIPSE_EDGE"), area::AREA_ELLIPSE_EDGE);
+    assert_eq!(constant("AREA_RING"), area::AREA_RING);
+    assert_eq!(constant("AREA_LINE"), area::AREA_LINE);
+    assert_eq!(constant("DIRECTION_OUTWARD"), SpawnDirection::Outward.id());
+    assert_eq!(constant("DIRECTION_NORMAL"), SpawnDirection::Normal.id());
 }
 
 #[test]

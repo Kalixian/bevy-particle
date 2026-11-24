@@ -6,7 +6,8 @@
 
 use bevy::prelude::*;
 use bevy_particle::{
-    Gravity, GravityMethod, Modifier, Modifiers, ParticleEmitter, ParticlePlugin, ParticleSpace,
+    Fill, Gravity, GravityMethod, Modifier, Modifiers, ParticleEmitter, ParticlePlugin,
+    ParticleSpace, SpawnArea,
 };
 
 const GRAVITY: Gravity =
@@ -30,7 +31,7 @@ fn cloud(red: f32, blue: f32) -> ParticleEmitter {
         burst_count: 8000,
         rate: 0.0,
         lifetime: None,
-        spawn_half_extents: Vec2::splat(120.0),
+        spawn: SpawnArea::Rect { half_extents: Vec2::splat(120.0), fill: Fill::Area },
         speed: (0.0..10.0).into(),
         red: (red..red).into(),
         blue: (blue..blue).into(),

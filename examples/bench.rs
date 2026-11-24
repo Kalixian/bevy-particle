@@ -9,7 +9,9 @@ use bevy::{
     diagnostic::DiagnosticsStore, prelude::*, render::diagnostic::RenderDiagnosticsPlugin,
     window::PresentMode,
 };
-use bevy_particle::{Gravity, GravityMethod, ParticleEmitter, ParticlePlugin, ParticleSpace};
+use bevy_particle::{
+    Fill, Gravity, GravityMethod, ParticleEmitter, ParticlePlugin, ParticleSpace, SpawnArea,
+};
 
 fn main() {
     let window = Window { present_mode: PresentMode::AutoNoVsync, ..default() };
@@ -39,7 +41,7 @@ fn setup(mut commands: Commands) {
         burst_count: if churn { 0 } else { live / emitters },
         rate: if churn { (live / emitters) as f32 } else { 0.0 },
         lifetime: churn.then(|| (1.0..1.0).into()),
-        spawn_half_extents: Vec2::splat(300.0),
+        spawn: SpawnArea::Rect { half_extents: Vec2::splat(300.0), fill: Fill::Area },
         radius: (0.5..0.5).into(),
         speed: (0.0..1.0).into(),
         gravity: mode == "gravity",
