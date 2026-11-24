@@ -34,6 +34,11 @@ mod desktop {
         }
     }
 
+    /// Whether there's an asset file that a new one would replace.
+    pub fn exists(path: &str) -> bool {
+        file_path(path).is_ok_and(|path| path.exists())
+    }
+
     /// Replaces an asset file.
     pub fn save(path: &str, text: &str) -> Result<(), BevyError> {
         Ok(replace_file(&file_path(path)?, text)?)
@@ -122,6 +127,11 @@ mod web {
         Ok(element.dyn_into().map_err(|_| format!("not a <{tag}>"))?)
     }
 
+    /// Downloads don't replace anything.
+    pub fn exists(_path: &str) -> bool {
+        false
+    }
+
     /// Downloads an asset.
     pub fn save(path: &str, text: &str) -> Result<(), BevyError> {
         let parts = js_sys::Array::of1(&JsValue::from_str(text));
@@ -163,15 +173,19 @@ mod web {
             let Some(files) = picker.files() else {
                 return;
             };
-            for file in (0..files.length()).filter_map(|i| files.get(i)) {
-                wasm_bindgen_futures::spawn_local(async move {
+            let files: Vec<_> = (0..files.length()).filter_map(|i| files.get(i)).collect();
+            // All at once, since they may need each other.
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut uploads = Vec::new();
+                for file in files {
                     let text = wasm_bindgen_futures::JsFuture::from(file.text()).await;
                     let text = text
                         .map(|text| text.as_string().unwrap_or_default())
                         .map_err(|error| format!("{error:?}"));
-                    UPLOADS.lock().unwrap().push((file.name(), text));
-                });
-            }
+                    uploads.push((file.name(), text));
+                }
+                UPLOADS.lock().unwrap().extend(uploads);
+            });
         });
         input.set_onchange(Some(on_change.unchecked_ref()));
         let canceled = input.clone();

@@ -5,6 +5,7 @@ mod curves;
 mod documents;
 mod files;
 mod inspector;
+mod manage;
 mod panel;
 mod platform;
 mod theme;
@@ -56,6 +57,9 @@ struct Editor {
     themed: bool,
     /// What the inspector shows, of the scene at this path.
     selection: (String, inspector::Selection),
+    dialog: Option<manage::Dialog>,
+    /// The name of a scene to show once it's on the list.
+    show_scene: Option<String>,
 }
 
 /// The UI has a camera of its own so that bloom and tonemapping leave it alone, and so that it

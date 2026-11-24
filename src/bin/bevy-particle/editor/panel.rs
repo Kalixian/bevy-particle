@@ -5,7 +5,7 @@ use bevy_particle::{EmitterState, SpaceState};
 use super::{
     documents::Documents,
     files::{Files, Notice},
-    inspector, theme, Editor,
+    inspector, manage, theme, Editor,
 };
 use crate::{
     demos::{effect_path, Demos},
@@ -27,6 +27,7 @@ pub(super) fn show(
     capture: Res<InputCapture>,
     spaces: Query<(&SpaceState, Option<&Children>)>,
     emitters: Query<&EmitterState>,
+    mut exit: MessageWriter<AppExit>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     if !editor.themed {
@@ -56,6 +57,13 @@ pub(super) fn show(
         },
         Err(_) => default(),
     };
+    let created = editor.show_scene.as_deref();
+    let created = demos.names().position(|name| Some(name) == created);
+    if let Some(index) = created {
+        demos.show(index);
+        editor.show_scene = None;
+    }
+
     let window = ctx.viewport_rect();
     let mut root = egui::Ui::new(
         ctx.clone(),
@@ -73,13 +81,19 @@ pub(super) fn show(
             let scene = demos.names().nth(demos.current()).map(effect_path);
             if let Some(scene) = scene {
                 undo_shortcuts(ctx, &scene, &mut documents);
-                show_files(ui, &scene, &mut documents, &mut files);
+                let Editor { dialog, show_scene, .. } = &mut *editor;
+                if show_files(ui, &scene, &mut documents, &mut files, dialog) {
+                    exit.write(AppExit::Success);
+                }
+                let created = manage::show_dialog(ui, &scene, &mut documents, dialog);
+                *show_scene = created.or(show_scene.take());
                 ui.separator();
                 if editor.selection.0 != scene {
                     editor.selection = (scene.clone(), default());
+                    editor.dialog = None;
                 }
-                let selection = &mut editor.selection.1;
-                inspector::show(ui, &scene, selection, &mut documents, &ages);
+                let Editor { selection: (_, selection), dialog, .. } = &mut *editor;
+                inspector::show(ui, &scene, selection, &mut documents, &ages, dialog);
             }
             // Keeps the panel as wide as it was dragged.
             ui.take_available_space();
@@ -155,22 +169,30 @@ fn undo_shortcuts(ctx: &egui::Context, scene: &str, documents: &mut Documents) {
     }
 }
 
-/// Saving, and what there is to say about it.
-fn show_files(ui: &mut egui::Ui, scene: &str, documents: &mut Documents, files: &mut Files) {
+/// Saving, and what there is to say about it. Returns whether to quit.
+fn show_files(
+    ui: &mut egui::Ui,
+    scene: &str,
+    documents: &mut Documents,
+    files: &mut Files,
+    dialog: &mut Option<manage::Dialog>,
+) -> bool {
     if !documents.is_open(scene) {
         ui.weak("Loading…");
     }
     let dirty = documents.dirty_files(Some(scene));
-    let conflict = documents.conflict_in(scene);
+    let conflict = documents.conflict_with(scene);
     ui.horizontal_wrapped(|ui| {
         let save = if cfg!(target_arch = "wasm32") { "Download" } else { "Save" };
-        let can_save = !dirty.is_empty() && conflict.is_none();
+        let to_save = documents.files_to_save(scene);
+        let can_save = !to_save.is_empty() && conflict.is_none();
         let button = ui.add_enabled(can_save, egui::Button::new(save));
-        if button.on_hover_text(dirty.join("\n")).clicked() {
+        if button.on_hover_text(to_save.join("\n")).clicked() {
             files.save(documents, Some(scene), false);
         }
-        let button = ui.add_enabled(!dirty.is_empty(), egui::Button::new("Revert"));
-        if button.on_hover_text("Drop the unsaved changes").clicked() {
+        let can_revert = dirty.iter().any(|path| documents.can_revert(path));
+        let button = ui.add_enabled(can_revert, egui::Button::new("Revert"));
+        if button.on_hover_text("Drop the unsaved changes to this scene").clicked() {
             for path in &dirty {
                 documents.revert(path);
             }
@@ -185,12 +207,13 @@ fn show_files(ui: &mut egui::Ui, scene: &str, documents: &mut Documents, files: 
         if button.on_hover_text("Ctrl+Shift+Z or Ctrl+Y").clicked() {
             documents.redo(scene);
         }
+        manage::scene_menu(ui, scene, documents, dialog);
+        let more = documents.dirty_files(None).iter().any(|path| !to_save.contains(path));
+        if more && ui.button(format!("{save} all")).clicked() {
+            files.save(documents, None, false);
+        }
         #[cfg(target_arch = "wasm32")]
         {
-            let any = !documents.dirty_files(None).is_empty();
-            if ui.add_enabled(any, egui::Button::new("Download all changed")).clicked() {
-                files.save(documents, None, false);
-            }
             let button = ui.button("Load files…");
             let hint = "Replaces scenes and emitters by downloaded ones with the same name";
             if button.on_hover_text(hint).clicked() {
@@ -220,14 +243,17 @@ fn show_files(ui: &mut egui::Ui, scene: &str, documents: &mut Documents, files: 
             }
         });
     }
-    show_notice(ui, documents, files);
+    show_notice(ui, documents, files)
 }
 
-fn show_notice(ui: &mut egui::Ui, documents: &mut Documents, files: &mut Files) {
+/// Returns whether to quit.
+fn show_notice(ui: &mut egui::Ui, documents: &mut Documents, files: &mut Files) -> bool {
+    let mut quit = false;
+    let mut save_all = false;
     let mut dismissed = false;
     let mut confirmed = None;
     match &files.notice {
-        None => return,
+        None => return false,
         Some(Notice::Info(text)) => {
             ui.weak(text);
             dismissed = ui.small_button("OK").clicked();
@@ -246,6 +272,22 @@ fn show_notice(ui: &mut egui::Ui, documents: &mut Documents, files: &mut Files) 
                 dismissed = ui.button("Cancel").clicked();
             });
         }
+        Some(Notice::Close) => {
+            let dirty = documents.dirty_files(None);
+            let text = format!("There are unsaved changes in {}.", dirty.join(", "));
+            ui.colored_label(theme::WARNING, text);
+            let commented: Vec<_> =
+                dirty.into_iter().filter(|path| documents.has_comments(path)).collect();
+            if !commented.is_empty() {
+                let text = format!("Saving removes the comments in {}.", commented.join(", "));
+                ui.colored_label(theme::WARNING, text);
+            }
+            ui.horizontal_wrapped(|ui| {
+                save_all = ui.button("Save all and quit").clicked();
+                quit = ui.button("Quit without saving").clicked();
+                dismissed = ui.button("Cancel").clicked();
+            });
+        }
     }
     if dismissed {
         files.notice = None;
@@ -253,6 +295,10 @@ fn show_notice(ui: &mut egui::Ui, documents: &mut Documents, files: &mut Files) 
     if let Some(scene) = confirmed {
         files.save(documents, scene.as_deref(), true);
     }
+    if save_all {
+        quit = files.save(documents, None, true);
+    }
+    quit
 }
 
 /// The dots are drawn, rather than being text, so that they don't depend on the font.

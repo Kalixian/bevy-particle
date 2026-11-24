@@ -3,7 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::{asset::AssetPath, prelude::*};
-use bevy_particle::{EffectFile, EmitterDef, ParticleEffect};
+use bevy_particle::{
+    EffectFile, EmitterDef, EmitterEntry, EmitterSource, ParticleEffect,
+    ParticleSpace,
+};
+
+use crate::demos::{effect_path, DemoList, LIST_PATH};
 
 /// What a kind of file contains.
 pub trait Contents: Clone + PartialEq {
@@ -31,10 +36,24 @@ impl Contents for EmitterDef {
     }
 }
 
+impl Contents for DemoList {
+    fn parse(text: &str) -> Result<Self, BevyError> {
+        Self::from_ron(text.as_bytes())
+    }
+
+    fn to_text(&self) -> Result<String, BevyError> {
+        self.to_ron()
+    }
+}
+
 /// One file.
 pub struct Document<T> {
     value: T,
     saved: T,
+    /// It was made in the editor and hasn't been saved since.
+    never_saved: bool,
+    /// Whether the app could load it as an asset. On the web, saving doesn't change that.
+    has_file: bool,
     /// The file's text, which `saved` is the meaning of.
     text: String,
     /// The file's new text, if it was changed by something else while there were unsaved changes.
@@ -44,11 +63,23 @@ pub struct Document<T> {
 impl<T: Contents> Document<T> {
     fn open(text: String) -> Result<Self, BevyError> {
         let value = T::parse(&text)?;
-        Ok(Self { saved: value.clone(), value, text, conflict: None })
+        let saved = value.clone();
+        Ok(Self { value, saved, never_saved: false, has_file: true, text, conflict: None })
+    }
+
+    fn new(value: T) -> Self {
+        Self {
+            saved: value.clone(),
+            value,
+            never_saved: true,
+            has_file: false,
+            text: String::new(),
+            conflict: None,
+        }
     }
 
     fn is_dirty(&self) -> bool {
-        self.value != self.saved
+        self.never_saved || self.value != self.saved
     }
 
     /// Takes note of the file's text having changed. Returns whether that changed the value.
@@ -65,6 +96,7 @@ impl<T: Contents> Document<T> {
         let changed = self.value != saved;
         self.value = saved.clone();
         self.saved = saved;
+        (self.never_saved, self.has_file) = (false, true);
         self.text = text;
         self.conflict = None;
         Ok(changed)
@@ -78,6 +110,7 @@ impl<T: Contents> Document<T> {
                 self.value = saved.clone();
             }
             self.saved = saved;
+            (self.never_saved, self.has_file) = (false, true);
             self.text = self.conflict.take().unwrap_or_default();
         }
         Ok(())
@@ -91,17 +124,21 @@ impl<T: Contents> Document<T> {
 
     fn mark_saved(&mut self, text: String) {
         self.saved = self.value.clone();
+        self.never_saved = false;
+        self.has_file |= cfg!(not(target_arch = "wasm32"));
         self.text = text;
         self.conflict = None;
     }
 }
 
-/// Calls a method of the document at a path, of either kind.
+/// Calls a method of the document at a path, of any kind.
 macro_rules! with_document {
     ($self:ident, $path:expr, $document:ident => $result:expr) => {
         if let Some($document) = $self.scenes.get_mut($path) {
             Some($result)
         } else if let Some($document) = $self.emitters.get_mut($path) {
+            Some($result)
+        } else if $path == LIST_PATH && let Some($document) = &mut $self.list {
             Some($result)
         } else {
             None
@@ -116,6 +153,7 @@ const MAX_HISTORY: usize = 200;
 enum Snapshot {
     Scene(EffectFile),
     Emitter(Box<EmitterDef>),
+    List(DemoList),
 }
 
 struct Step {
@@ -135,6 +173,7 @@ fn differ<T: PartialEq + std::fmt::Debug>(a: &T, b: &T) -> bool {
 pub struct Documents {
     scenes: BTreeMap<String, Document<EffectFile>>,
     emitters: BTreeMap<String, Document<EmitterDef>>,
+    list: Option<Document<DemoList>>,
     /// Files whose value changed since [`Self::take_changed`].
     changed: BTreeSet<String>,
     undo: Vec<Step>,
@@ -163,6 +202,9 @@ impl Documents {
             Some(result) => {
                 result?;
             }
+            None if path == LIST_PATH => {
+                self.list = Some(Document::open(text)?);
+            }
             None if is_emitter_file(path) => {
                 self.emitters.insert(path.into(), Document::open(text)?);
             }
@@ -174,7 +216,87 @@ impl Documents {
     }
 
     pub fn is_open(&self, path: &str) -> bool {
-        self.scenes.contains_key(path) || self.emitters.contains_key(path)
+        self.scenes.contains_key(path)
+            || self.emitters.contains_key(path)
+            || (path == LIST_PATH && self.list.is_some())
+    }
+
+    /// Whether the app could load this as an asset. Unless it's known not to exist, it could.
+    pub fn has_file(&self, path: &str) -> bool {
+        self.scenes.get(path).is_none_or(|document| document.has_file)
+            && self.emitters.get(path).is_none_or(|document| document.has_file)
+    }
+
+    pub fn list(&self) -> Option<&DemoList> {
+        self.list.as_ref().map(|document| &document.value)
+    }
+
+    /// Changes the list of scenes, as something that can be undone.
+    pub fn edit_list(&mut self, list: DemoList) {
+        if let Some(old) = self.list()
+            && *old != list
+        {
+            let old = old.clone();
+            self.record(LIST_PATH, Snapshot::List(old));
+            self.set(LIST_PATH, Snapshot::List(list));
+        }
+    }
+
+    /// Adds a scene without a file to the list, after the scene named `after` or at the end.
+    pub fn add_scene(
+        &mut self,
+        name: &str,
+        file: EffectFile,
+        after: Option<&str>,
+    ) -> Result<(), BevyError> {
+        check_name(name)?;
+        let path = effect_path(name);
+        if self.is_open(&path) || self.list().is_some_and(|list| list.scenes.contains(&name.into()))
+        {
+            return Err(format!("there's a scene called {name} already").into());
+        }
+        // Refuse what can't be shown.
+        self.build_file(&path, &file, |_| Handle::default())?;
+        let mut list = self.list().ok_or("the list of scenes isn't open")?.clone();
+        let place = list.scenes.iter().position(|other| Some(other.as_str()) == after);
+        list.scenes.insert(place.map_or(list.scenes.len(), |place| place + 1), name.into());
+        self.scenes.insert(path.clone(), Document::new(file));
+        self.changed.insert(path);
+        self.edit_list(list);
+        self.end_group();
+        Ok(())
+    }
+
+    /// Takes a scene off the list. Its file stays.
+    pub fn remove_scene(&mut self, name: &str) {
+        let Some(mut list) = self.list().cloned() else {
+            return;
+        };
+        list.scenes.retain(|other| other != name);
+        let Some(first) = list.scenes.first() else {
+            return; // There has to be one.
+        };
+        if list.start == name {
+            list.start = first.clone();
+        }
+        self.edit_list(list);
+        self.end_group();
+    }
+
+    /// Opens an emitter file that doesn't exist yet.
+    pub fn add_emitter(&mut self, path: &str, def: EmitterDef) -> Result<(), BevyError> {
+        if self.is_open(path) {
+            return Err(format!("{path} exists already").into());
+        }
+        if let Some(tracks) = &def.tracks {
+            tracks.check(&def.emitter)?;
+        }
+        self.emitters.insert(path.into(), Document::new(def));
+        Ok(())
+    }
+
+    pub fn emitter_files(&self) -> impl Iterator<Item = &str> {
+        self.emitters.keys().map(String::as_str)
     }
 
     /// Replaces a file's value with that of `text`, as an unsaved change.
@@ -191,6 +313,8 @@ impl Documents {
                 tracks.check(&def.emitter)?;
             }
             self.edit_emitter(path, def);
+        } else if path == LIST_PATH && self.list.is_some() {
+            self.edit_list(DemoList::from_ron(text.as_bytes())?);
         } else {
             return Err(format!("{path} isn't open").into());
         }
@@ -258,11 +382,19 @@ impl Documents {
                     document.value = *def;
                 }
             }
+            Snapshot::List(list) => {
+                if let Some(document) = &mut self.list {
+                    document.value = list;
+                }
+            }
         }
         self.changed.insert(path.into());
     }
 
     fn snapshot(&self, path: &str) -> Option<Snapshot> {
+        if path == LIST_PATH {
+            return self.list().cloned().map(Snapshot::List);
+        }
         let scene = self.scene(path).cloned().map(Snapshot::Scene);
         scene.or_else(|| self.emitter(path).cloned().map(|def| Snapshot::Emitter(Box::new(def))))
     }
@@ -272,19 +404,26 @@ impl Documents {
         self.redo.retain(|step| step.path != path);
     }
 
+    /// The files that undoing affects while a scene is on screen.
+    fn undo_scope(&self, scene: &str) -> Vec<String> {
+        let mut files = self.files_of(scene);
+        files.push(LIST_PATH.into());
+        files
+    }
+
     pub fn can_undo(&self, scene: &str) -> bool {
-        let files = self.files_of(scene);
+        let files = self.undo_scope(scene);
         self.undo.iter().any(|step| files.contains(&step.path))
     }
 
     pub fn can_redo(&self, scene: &str) -> bool {
-        let files = self.files_of(scene);
+        let files = self.undo_scope(scene);
         self.redo.iter().any(|step| files.contains(&step.path))
     }
 
-    /// Undoes the last step in the files of a scene.
+    /// Undoes the last step in the files of a scene, or in the list of scenes.
     pub fn undo(&mut self, scene: &str) {
-        let files = self.files_of(scene);
+        let files = self.undo_scope(scene);
         if let Some(index) = self.undo.iter().rposition(|step| files.contains(&step.path)) {
             let Step { path, group, snapshot } = self.undo.remove(index);
             if let Some(current) = self.snapshot(&path) {
@@ -296,7 +435,7 @@ impl Documents {
     }
 
     pub fn redo(&mut self, scene: &str) {
-        let files = self.files_of(scene);
+        let files = self.undo_scope(scene);
         if let Some(index) = self.redo.iter().rposition(|step| files.contains(&step.path)) {
             let Step { path, group, snapshot } = self.redo.remove(index);
             if let Some(current) = self.snapshot(&path) {
@@ -348,23 +487,64 @@ impl Documents {
     pub fn is_dirty(&self, path: &str) -> bool {
         self.scenes.get(path).is_some_and(Document::is_dirty)
             || self.emitters.get(path).is_some_and(Document::is_dirty)
+            || (path == LIST_PATH && self.list.as_ref().is_some_and(Document::is_dirty))
     }
 
     /// The files with unsaved changes, out of those of a scene or out of all.
     pub fn dirty_files(&self, scene: Option<&str>) -> Vec<String> {
-        let files = match scene {
-            Some(scene) => self.files_of(scene),
-            None => self.scenes.keys().chain(self.emitters.keys()).cloned().collect(),
+        let files: BTreeSet<_> = match scene {
+            Some(scene) => self.files_of(scene).into_iter().collect(),
+            None => self.used_files(),
         };
         files.into_iter().filter(|path| self.is_dirty(path)).collect()
     }
 
-    /// The first file of a scene that was also changed by something else.
-    pub fn conflict_in(&self, scene: &str) -> Option<String> {
-        self.files_of(scene).into_iter().find(|path| {
-            self.scenes.get(path).is_some_and(|document| document.conflict.is_some())
-                || self.emitters.get(path).is_some_and(|document| document.conflict.is_some())
-        })
+    /// Every file but those that exist only in the editor and aren't part of anything (any more).
+    fn used_files(&self) -> BTreeSet<String> {
+        let listed = |scene: &String| {
+            self.list().is_none_or(|list| list.scenes.iter().any(|s| effect_path(s) == *scene))
+        };
+        let scenes = self.scenes.iter().filter(|(path, scene)| !scene.never_saved || listed(path));
+        let mut files: BTreeSet<_> = scenes.flat_map(|(path, _)| self.files_of(path)).collect();
+        let existing = self.emitters.iter().filter(|(_, document)| !document.never_saved);
+        files.extend(existing.map(|(path, _)| path.clone()));
+        files.insert(LIST_PATH.into());
+        files
+    }
+
+    /// What saving a scene should save. If the list has changed, that too, and with it the new
+    /// scenes on it, so that it doesn't name any that don't exist.
+    pub fn files_to_save(&self, scene: &str) -> Vec<String> {
+        let mut files = self.dirty_files(Some(scene));
+        if self.is_dirty(LIST_PATH) {
+            for name in self.list().map_or(&[][..], |list| &list.scenes) {
+                let other = effect_path(name);
+                if self.scenes.get(&other).is_some_and(|document| document.never_saved) {
+                    files.extend(self.dirty_files(Some(&other)));
+                }
+            }
+            files.sort();
+            files.dedup();
+            // Last, once everything on it is there.
+            files.push(LIST_PATH.into());
+        }
+        files
+    }
+
+    /// The first of some files that was also changed by something else.
+    pub fn conflict_in(&self, files: &[String]) -> Option<String> {
+        let conflicted = |path: &&String| {
+            self.scenes.get(*path).is_some_and(|document| document.conflict.is_some())
+                || self.emitters.get(*path).is_some_and(|document| document.conflict.is_some())
+                || (*path == LIST_PATH
+                    && self.list.as_ref().is_some_and(|document| document.conflict.is_some()))
+        };
+        files.iter().find(conflicted).cloned()
+    }
+
+    /// Like [`Self::conflict_in`], for what's on screen with a scene.
+    pub fn conflict_with(&self, scene: &str) -> Option<String> {
+        self.conflict_in(&self.undo_scope(scene))
     }
 
     pub fn resolve(&mut self, path: &str, keep_mine: bool) -> Result<(), BevyError> {
@@ -377,17 +557,28 @@ impl Documents {
 
     /// Drops a file's unsaved changes. Can be undone.
     pub fn revert(&mut self, path: &str) {
-        if let Some(file) = self.scenes.get(path).map(|document| document.saved.clone()) {
-            self.edit_scene(path, file);
-        } else if let Some(def) = self.emitters.get(path).map(|document| document.saved.clone()) {
-            self.edit_emitter(path, def);
+        if let Some(document) = self.scenes.get(path).filter(|document| !document.never_saved) {
+            self.edit_scene(path, document.saved.clone());
+        } else if let Some(document) =
+            self.emitters.get(path).filter(|document| !document.never_saved)
+        {
+            self.edit_emitter(path, document.saved.clone());
         }
+    }
+
+    /// Whether [`Self::revert`] would do anything.
+    pub fn can_revert(&self, path: &str) -> bool {
+        self.scenes.get(path).is_some_and(|d| !d.never_saved && d.is_dirty())
+            || self.emitters.get(path).is_some_and(|d| !d.never_saved && d.is_dirty())
     }
 
     /// Whether saving would lose comments, which aren't part of a file's value.
     pub fn has_comments(&self, path: &str) -> bool {
         let scene = self.scenes.get(path).map(|document| &document.text);
-        let text = scene.or(self.emitters.get(path).map(|document| &document.text));
+        let list = self.list.as_ref().filter(|_| path == LIST_PATH);
+        let text = scene
+            .or(self.emitters.get(path).map(|document| &document.text))
+            .or(list.map(|document| &document.text));
         text.is_some_and(|text| has_comments(text))
     }
 
@@ -433,6 +624,42 @@ impl Documents {
             }
         };
         file.build(&AssetPath::parse(scene), emitter, image)
+    }
+}
+
+/// Names of scenes and emitter files become part of file names.
+pub fn check_name(name: &str) -> Result<(), BevyError> {
+    let fits = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_');
+    if name.is_empty() || name.len() > 60 || !name.chars().all(fits) {
+        return Err("names are made of a-z, 0-9, - and _".into());
+    }
+    Ok(())
+}
+
+/// The first of `name`, `name2`, `name3`.. that isn't taken.
+pub fn free_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    let numbered = (2..).map(|number| format!("{name}{number}"));
+    std::iter::once(name.to_string()).chain(numbered).find(|name| !taken(name)).unwrap()
+}
+
+/// A scene to start from.
+pub fn new_scene() -> EffectFile {
+    EffectFile {
+        space: ParticleSpace { capacity: 10_000 },
+        render: default(),
+        gravity: None,
+        attractor: None,
+        modifiers: default(),
+        emitters: vec![new_emitter()],
+    }
+}
+
+pub fn new_emitter() -> EmitterEntry {
+    EmitterEntry {
+        position: Vec2::ZERO,
+        rotation: 0.0,
+        motion: default(),
+        source: EmitterSource::Inline(default()),
     }
 }
 
@@ -518,7 +745,7 @@ mod tests {
         assert!(!documents.is_dirty(EMITTER));
         // The file watcher reports the save.
         documents.file_loaded(EMITTER, text).unwrap();
-        assert!(documents.take_changed().is_empty() && documents.conflict_in(SCENE).is_none());
+        assert!(documents.take_changed().is_empty() && documents.conflict_with(SCENE).is_none());
     }
 
     #[test]
@@ -530,10 +757,10 @@ mod tests {
         documents.replace(EMITTER, &emitter(5.0)).unwrap();
         documents.file_loaded(EMITTER, emitter(3.0)).unwrap();
         assert_eq!(rate(&documents), 5.0);
-        assert_eq!(documents.conflict_in(SCENE).as_deref(), Some(EMITTER));
+        assert_eq!(documents.conflict_with(SCENE).as_deref(), Some(EMITTER));
 
         documents.resolve(EMITTER, true).unwrap();
-        assert!(documents.conflict_in(SCENE).is_none() && documents.is_dirty(EMITTER));
+        assert!(documents.conflict_with(SCENE).is_none() && documents.is_dirty(EMITTER));
         // Mine is kept, but reverting now gets theirs.
         assert_eq!(rate(&documents), 5.0);
         documents.revert(EMITTER);
@@ -620,6 +847,103 @@ mod tests {
         documents.undo(SCENE);
         documents.redo(SCENE);
         assert_eq!(rate(&documents), 2.0);
+    }
+
+    fn open_with_list() -> Documents {
+        let mut documents = open();
+        let list = "(start: \"a\", scenes: [\"a\"]) // demos";
+        documents.file_loaded(LIST_PATH, list.into()).unwrap();
+        documents
+    }
+
+    fn names(documents: &Documents) -> Vec<&str> {
+        documents.list().unwrap().scenes.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn new_scenes_are_saved_before_the_list() {
+        let mut documents = open_with_list();
+        documents.add_scene("z", new_scene(), Some("a")).unwrap();
+        documents.add_scene("b", new_scene(), Some("a")).unwrap();
+        assert_eq!(names(&documents), ["a", "b", "z"]);
+        let z = effect_path("z");
+        assert!(!documents.has_file(&z) && documents.is_dirty(&z) && !documents.can_revert(&z));
+        assert!(documents.build(&z, |_| default()).is_ok());
+        // From any scene.
+        let files = documents.files_to_save(SCENE);
+        assert_eq!(files, [effect_path("b"), z.clone(), LIST_PATH.into()]);
+        assert!(documents.has_comments(LIST_PATH));
+
+        for path in files {
+            let text = documents.to_save(&path).unwrap();
+            documents.mark_saved(&path, text);
+        }
+        assert!(documents.dirty_files(None).is_empty() && documents.has_file(&z));
+    }
+
+    #[test]
+    fn undone_scenes_arent_unsaved_changes() {
+        let mut documents = open_with_list();
+        documents.add_scene("b", new_scene(), None).unwrap();
+        documents.undo(SCENE);
+        assert_eq!(names(&documents), ["a"]);
+        assert!(documents.dirty_files(None).is_empty());
+        documents.redo(SCENE);
+        assert_eq!(names(&documents), ["a", "b"]);
+        assert_eq!(documents.dirty_files(None).len(), 2);
+    }
+
+    #[test]
+    fn scene_names_must_be_free_and_usable() {
+        let mut documents = open_with_list();
+        for name in ["a", "", "A", "a/b", "..", "a b", "a.b"] {
+            assert!(documents.add_scene(name, new_scene(), None).is_err(), "{name}");
+        }
+        assert_eq!(free_name("a", |name| ["a", "a2"].contains(&name)), "a3");
+        assert_eq!(free_name("b", |_| false), "b");
+    }
+
+    #[test]
+    fn removing_scenes_keeps_the_list_usable() {
+        let mut documents = open_with_list();
+        documents.remove_scene("a");
+        assert_eq!(names(&documents), ["a"]);
+        documents.add_scene("b", new_scene(), None).unwrap();
+        documents.replace(SCENE, &scene(9)).unwrap();
+        documents.remove_scene("a");
+        // Its changes aren't forgotten.
+        assert!(documents.dirty_files(None).contains(&SCENE.to_string()));
+        let list = documents.list().unwrap();
+        assert_eq!((list.start.as_str(), &list.scenes[..]), ("b", &["b".to_string()][..]));
+        assert!(DemoList::from_ron(list.to_ron().unwrap().as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_new_files_name_being_taken_is_a_conflict() {
+        let mut documents = open_with_list();
+        documents.add_scene("b", new_scene(), None).unwrap();
+        let b = effect_path("b");
+        // As saving finds it.
+        documents.file_loaded(&b, scene(5)).unwrap();
+        assert_eq!(documents.conflict_with(&b), Some(b.clone()));
+        documents.resolve(&b, true).unwrap();
+        assert!(documents.is_dirty(&b));
+        assert_eq!(documents.scene(&b).unwrap().space.capacity, 10_000);
+    }
+
+    #[test]
+    fn emitter_files_that_nothing_uses_dont_need_saving() {
+        let mut documents = open_with_list();
+        documents.add_emitter("effects/n.emitter.ron", default()).unwrap();
+        assert!(documents.add_emitter("effects/n.emitter.ron", default()).is_err());
+        assert!(documents.dirty_files(None).is_empty());
+        let mut file = documents.scene(SCENE).unwrap().clone();
+        file.emitters[0].source = EmitterSource::File("n.emitter.ron".into());
+        documents.edit_scene(SCENE, file);
+        assert_eq!(documents.dirty_files(Some(SCENE)), [SCENE, "effects/n.emitter.ron"]);
+        // Changes to existing ones do, even if nothing uses them any more.
+        documents.replace(EMITTER, &emitter(5.0)).unwrap();
+        assert!(documents.dirty_files(None).contains(&EMITTER.to_string()));
     }
 
     #[test]

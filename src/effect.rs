@@ -87,33 +87,17 @@ impl ParticleEffect {
         }
         let space = space.id();
 
-        for EffectEmitter { position, rotation, motion, def } in &self.emitters {
-            let mut emitter = commands.spawn((
-                ChildOf(space),
-                Transform::from_translation(position.extend(0.0))
-                    .with_rotation(Quat::from_rotation_z(*rotation)),
-                def.emitter.clone(),
-                def.modifiers.clone(),
-            ));
-            if let Some(tracks) = &def.tracks {
-                emitter.insert(tracks.clone());
-            }
-            if !motion.is_empty() {
-                emitter.insert(motion.clone());
-            }
-            if let Some(attractor) = &def.attractor {
-                emitter.insert(attractor.clone());
-            }
+        for emitter in &self.emitters {
+            emitter.spawn(commands, space);
         }
         space
     }
 
-    /// Changes what `old` spawned into this effect, leaving existing particles in place.
-    /// `emitters` are the space's child emitters, in order.
+    /// Changes what `old` spawned into this effect, leaving existing particles in place (except
+    /// those of removed emitters). `emitters` are the space's child emitters, in order.
     ///
-    /// Returns `false`, without doing anything, if only a respawn can make the change: to the
-    /// capacity, or to the number of emitters. A changed burst shows the next time the effect is
-    /// spawned.
+    /// Returns `false`, without doing anything, if only a respawn can make the change, which is to
+    /// the capacity. A changed burst shows the next time the effect is spawned.
     pub fn update(
         &self,
         old: &Self,
@@ -121,33 +105,76 @@ impl ParticleEffect {
         space: Entity,
         emitters: &[Entity],
     ) -> bool {
-        if self.space != old.space
-            || self.emitters.len() != old.emitters.len()
-            || self.emitters.len() != emitters.len()
-        {
+        if self.space != old.space || old.emitters.len() != emitters.len() {
             return false;
         }
-        let mut space = commands.entity(space);
-        space.insert((self.render.clone(), self.modifiers.clone()));
-        set_component(&mut space, self.gravity);
-        set_component(&mut space, self.attractor.clone());
+        let mut entity = commands.entity(space);
+        entity.insert((self.render.clone(), self.modifiers.clone()));
+        set_component(&mut entity, self.gravity);
+        set_component(&mut entity, self.attractor.clone());
 
-        for ((entry, old), entity) in self.emitters.iter().zip(&old.emitters).zip(emitters) {
-            let EffectEmitter { position, rotation, motion, def } = entry;
-            let mut emitter = commands.entity(*entity);
-            emitter.insert((def.emitter.clone(), def.modifiers.clone()));
-            set_component(&mut emitter, def.tracks.clone());
-            set_component(&mut emitter, def.attractor.clone());
-            set_component(&mut emitter, (!motion.is_empty()).then(|| motion.clone()));
-            let placement = (position, rotation, motion);
-            if placement != (&old.position, &old.rotation, &old.motion) {
-                emitter.insert(
-                    Transform::from_translation(position.extend(0.0))
-                        .with_rotation(Quat::from_rotation_z(*rotation)),
-                );
+        // Where emitters were added or removed, the ones around them keep their entities.
+        let (new, old) = (&self.emitters, &old.emitters);
+        let same = new.iter().zip(old).take_while(|(new, old)| new == old).count();
+        let most = new.len().min(old.len()) - same;
+        let same_at_end = new.iter().rev().zip(old.iter().rev());
+        let same_at_end = same_at_end.take(most).take_while(|(new, old)| new == old).count();
+        let new_changed = same..new.len() - same_at_end;
+        let old_changed = same..old.len() - same_at_end;
+
+        let common = new_changed.len().min(old_changed.len());
+        for index in same..same + common {
+            new[index].update(&old[index], commands, emitters[index]);
+        }
+        for index in old_changed.start + common..old_changed.end {
+            commands.entity(emitters[index]).despawn();
+        }
+        for index in new_changed.start + common..new_changed.end {
+            let emitter = new[index].spawn(commands, space);
+            // It's the last child now. There can be children that aren't emitters, so its place is
+            // found from the emitter that should follow it.
+            if let Some(next) = emitters.get(same + common).copied() {
+                commands.queue(move |world: &mut World| {
+                    let children = world.get::<Children>(space);
+                    let place = children.and_then(|children| children.iter().position(|c| c == next));
+                    if let Some(place) = place {
+                        world.entity_mut(space).insert_children(place, &[emitter]);
+                    }
+                });
             }
         }
         true
+    }
+}
+
+impl EffectEmitter {
+    fn transform(&self) -> Transform {
+        Transform::from_translation(self.position.extend(0.0))
+            .with_rotation(Quat::from_rotation_z(self.rotation))
+    }
+
+    fn spawn(&self, commands: &mut Commands, space: Entity) -> Entity {
+        let mut emitter = commands.spawn((ChildOf(space), self.transform()));
+        self.insert_settings(&mut emitter);
+        emitter.id()
+    }
+
+    fn update(&self, old: &Self, commands: &mut Commands, entity: Entity) {
+        let mut emitter = commands.entity(entity);
+        self.insert_settings(&mut emitter);
+        let placement = (&self.position, &self.rotation, &self.motion);
+        if placement != (&old.position, &old.rotation, &old.motion) {
+            emitter.insert(self.transform());
+        }
+    }
+
+    /// Everything but the placement.
+    fn insert_settings(&self, entity: &mut EntityCommands) {
+        let Self { motion, def, .. } = self;
+        entity.insert((def.emitter.clone(), def.modifiers.clone()));
+        set_component(entity, def.tracks.clone());
+        set_component(entity, def.attractor.clone());
+        set_component(entity, (!motion.is_empty()).then(|| motion.clone()));
     }
 }
 
@@ -393,10 +420,65 @@ mod tests {
 
         let mut bigger = old.clone();
         bigger.space.capacity = 9;
-        let mut fewer = old.clone();
-        fewer.emitters.pop();
-        for new in [bigger, fewer] {
-            assert!(!new.update(&old, &mut app.world_mut().commands(), space, &emitters));
+        assert!(!bigger.update(&old, &mut app.world_mut().commands(), space, &emitters));
+    }
+
+    #[test]
+    fn emitters_around_added_and_removed_ones_keep_their_entities() {
+        let effect = |rates: &[f32]| ParticleEffect {
+            space: ParticleSpace { capacity: 8 },
+            render: default(),
+            gravity: None,
+            attractor: None,
+            modifiers: default(),
+            emitters: rates
+                .iter()
+                .map(|rate| EffectEmitter {
+                    position: Vec2::ZERO,
+                    rotation: 0.0,
+                    motion: default(),
+                    def: EmitterDef {
+                        emitter: ParticleEmitter { rate: *rate, ..default() },
+                        ..default()
+                    },
+                })
+                .collect(),
+        };
+        // (before, after, the old index that each emitter afterwards has the entity of)
+        let cases: [(&[f32], &[f32], &[Option<usize>]); 9] = [
+            (&[1.0, 2.0, 3.0], &[1.0, 3.0], &[Some(0), Some(2)]),
+            (&[1.0, 2.0, 3.0], &[2.0, 3.0], &[Some(1), Some(2)]),
+            (&[1.0, 3.0], &[1.0, 2.0, 3.0], &[Some(0), None, Some(1)]),
+            (&[1.0, 2.0], &[9.0, 1.0, 2.0], &[None, Some(0), Some(1)]),
+            (&[1.0], &[1.0, 2.0, 3.0], &[Some(0), None, None]),
+            (&[4.0], &[2.0, 3.0, 4.0], &[None, None, Some(0)]),
+            (&[], &[1.0], &[None]),
+            (&[1.0], &[], &[]),
+            (&[1.0, 1.0], &[1.0, 1.0, 1.0], &[Some(0), Some(1), None]),
+        ];
+        for (before, after, kept) in cases {
+            let mut world = World::new();
+            let (old, new) = (effect(before), effect(after));
+            let space = old.spawn(&mut world.commands());
+            world.flush();
+            // Other children don't get in the way.
+            let other = world.spawn_empty().id();
+            world.entity_mut(space).insert_children(0, &[other]);
+            let list = |world: &World| -> Vec<_> {
+                let children = world.get::<Children>(space).unwrap();
+                children.iter().filter(|child| *child != other).collect()
+            };
+            let entities = list(&world);
+            assert!(new.update(&old, &mut world.commands(), space, &entities));
+            world.flush();
+            let result = list(&world);
+            let rates: Vec<_> =
+                result.iter().map(|e| world.get::<ParticleEmitter>(*e).unwrap().rate).collect();
+            assert_eq!(rates, after, "{before:?}");
+            for (entity, kept) in result.iter().zip(kept) {
+                let old = entities.iter().position(|old| old == entity);
+                assert_eq!(old, *kept, "{before:?} to {after:?}");
+            }
         }
     }
 

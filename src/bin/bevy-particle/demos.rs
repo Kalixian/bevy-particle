@@ -11,11 +11,11 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_particle::{ParticleEffect, ParticleEmitter, ParticleSpace};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::input::{CaptureSystems, InputCapture};
 
-const LIST_PATH: &str = "demos.ron";
+pub const LIST_PATH: &str = "demos.ron";
 const SCENE_KEYS: [KeyCode; 9] = [
     KeyCode::Digit1,
     KeyCode::Digit2,
@@ -41,21 +41,27 @@ impl Plugin for DemosPlugin {
 }
 
 /// The demos by name.
-#[derive(Asset, TypePath, Debug, Deserialize)]
+#[derive(Asset, TypePath, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DemoList {
+pub struct DemoList {
     /// The scene shown first.
-    start: String,
-    scenes: Vec<String>,
+    pub start: String,
+    pub scenes: Vec<String>,
 }
 
 impl DemoList {
-    fn from_ron(bytes: &[u8]) -> Result<Self, BevyError> {
+    pub fn from_ron(bytes: &[u8]) -> Result<Self, BevyError> {
         let list: Self = ron::de::from_bytes(bytes)?;
         if !list.scenes.contains(&list.start) {
             return Err(format!("start scene \"{}\" isn't in the list", list.start).into());
         }
         Ok(list)
+    }
+
+    #[cfg(feature = "editor")]
+    pub fn to_ron(&self) -> Result<String, BevyError> {
+        let config = ron::ser::PrettyConfig::new().new_line("\n");
+        Ok(ron::ser::to_string_pretty(self, config)? + "\n")
     }
 }
 
@@ -116,6 +122,15 @@ impl Demos {
         self.scenes.iter().find(|(other, _)| other == name).map(|(_, handle)| handle)
     }
 
+    /// Replaces the list of scenes. Stays on the current one, if it's still there.
+    pub fn set_scenes(&mut self, scenes: Vec<(String, Handle<ParticleEffect>)>) {
+        let name = self.scenes.get(self.current).map(|(name, _)| name);
+        let index = scenes.iter().position(|(other, _)| Some(other) == name);
+        self.respawn |= index.is_none();
+        self.current = index.unwrap_or(self.current.min(scenes.len().saturating_sub(1)));
+        self.scenes = scenes;
+    }
+
     pub fn show(&mut self, index: usize) {
         self.current = index;
         self.respawn = true;
@@ -159,13 +174,16 @@ fn read_list(
     let index = list.scenes.iter().position(|name| name == current);
     let start = list.scenes.iter().position(|name| *name == list.start);
     let current = index.or(start).unwrap_or(0);
-    demos.scenes = list
-        .scenes
-        .iter()
-        .map(|name| (name.clone(), assets.load(effect_path(name))))
-        .collect();
+    // Scenes that stay listed keep their effect, which may not have a file yet.
+    let scenes = list.scenes.iter().map(|name| {
+        let old = demos.scenes.iter().find(|(other, _)| other == name);
+        let handle = old.map(|(_, handle)| handle.clone());
+        (name.clone(), handle.unwrap_or_else(|| assets.load(effect_path(name))))
+    });
+    demos.scenes = scenes.collect();
     demos.current = current;
-    demos.respawn = true;
+    // The scene on screen goes on if it's still listed.
+    demos.respawn |= index.is_none() || demos.shown.is_none();
 }
 
 /// Picks or restarts a scene with the keyboard.
@@ -265,6 +283,26 @@ mod tests {
             let path = format!("{root}{}", effect_path(&name));
             assert!(std::fs::exists(&path).unwrap(), "{path}");
         }
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn lists_survive_saving() {
+        let list = DemoList { start: "b".into(), scenes: vec!["a".into(), "b".into()] };
+        assert_eq!(DemoList::from_ron(list.to_ron().unwrap().as_bytes()).unwrap(), list);
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn the_current_scene_is_kept_if_it_stays_listed() {
+        let scenes = |names: &[&str]| -> Vec<(String, Handle<ParticleEffect>)> {
+            names.iter().map(|name| (name.to_string(), default())).collect()
+        };
+        let mut demos = Demos { scenes: scenes(&["a", "b", "c"]), current: 1, ..default() };
+        demos.set_scenes(scenes(&["c", "a", "b"]));
+        assert_eq!((demos.current, demos.respawn), (2, false));
+        demos.set_scenes(scenes(&["c", "a"]));
+        assert_eq!((demos.current, demos.respawn), (1, true));
     }
 
     #[test]

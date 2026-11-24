@@ -44,6 +44,8 @@ fn default_plugins() -> impl PluginGroup {
                 prevent_default_event_handling: false,
                 ..default()
             }),
+            // The editor asks about unsaved changes first.
+            close_when_requested: cfg!(not(feature = "editor")),
             ..default()
         })
         .set(AssetPlugin {

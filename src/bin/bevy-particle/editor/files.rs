@@ -6,10 +6,14 @@ use bevy::{
     asset::{io::Reader, AssetLoadFailedEvent, AssetLoader, LoadContext},
     prelude::*,
 };
+#[cfg(target_arch = "wasm32")]
+use bevy_particle::{EffectFile, EmitterDef};
 use bevy_particle::ParticleEffect;
 
+#[cfg(target_arch = "wasm32")]
+use super::documents::is_emitter_file;
 use super::{documents::Documents, platform, Editor};
-use crate::demos::{effect_path, Demos};
+use crate::demos::{effect_path, Demos, LIST_PATH};
 
 pub struct FilesPlugin;
 
@@ -27,7 +31,10 @@ impl Plugin for FilesPlugin {
                     #[cfg(target_arch = "wasm32")]
                     read_uploads,
                     keep_unsaved_changes,
+                    update_list,
                     update_effects,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    close_window,
                     #[cfg(target_arch = "wasm32")]
                     warn_before_leaving,
                 )
@@ -74,6 +81,9 @@ pub enum Notice {
     Error(String),
     /// Saving these would lose their comments.
     Comments { scene: Option<String>, files: Vec<String> },
+    /// The window is about to be closed with unsaved changes.
+    #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "the browser asks"))]
+    Close,
 }
 
 impl Files {
@@ -83,11 +93,25 @@ impl Files {
     }
 
     /// Saves the changed files of a scene, or of every scene. Asks first if comments would be
-    /// lost, unless that's `confirmed`.
-    pub fn save(&mut self, documents: &mut Documents, scene: Option<&str>, confirmed: bool) {
+    /// lost, unless that's `confirmed`. Returns whether everything was saved.
+    pub fn save(
+        &mut self,
+        documents: &mut Documents,
+        scene: Option<&str>,
+        confirmed: bool,
+    ) -> bool {
         self.notice = None;
+        let to_save = |documents: &Documents| match scene {
+            Some(scene) => documents.files_to_save(scene),
+            None => {
+                let mut files = documents.dirty_files(None);
+                // Last, once everything on it is there.
+                files.sort_by_key(|path| path == LIST_PATH);
+                files
+            }
+        };
         #[cfg(not(target_arch = "wasm32"))]
-        for path in documents.dirty_files(scene) {
+        for path in to_save(documents) {
             // Something may have changed the file without us noticing.
             let result = platform::read(&path).and_then(|text| match text {
                 Some(text) => documents.file_loaded(&path, text),
@@ -95,20 +119,24 @@ impl Files {
             });
             if let Err(error) = result {
                 self.error(&path, error);
-                return;
+                return false;
             }
         }
-        // Asked about by the panel.
-        if scene.is_some_and(|scene| documents.conflict_in(scene).is_some()) {
-            return;
+        let files = to_save(documents);
+        if let Some(path) = documents.conflict_in(&files) {
+            // The panel asks about those of the scene on screen.
+            if scene.is_none_or(|scene| documents.conflict_with(scene).is_none()) {
+                let text = format!("{path} was changed outside the editor. Show a scene that uses it to settle this.");
+                self.notice = Some(Notice::Error(text));
+            }
+            return false;
         }
-        let files = documents.dirty_files(scene);
         let commented: Vec<_> =
             files.iter().filter(|path| documents.has_comments(path)).cloned().collect();
         if !confirmed && !commented.is_empty() {
             let scene = scene.map(Into::into);
             self.notice = Some(Notice::Comments { scene, files: commented });
-            return;
+            return false;
         }
         for path in &files {
             let result = documents.to_save(path).and_then(|text| {
@@ -119,7 +147,7 @@ impl Files {
                 Ok(text) => documents.mark_saved(path, text),
                 Err(error) => {
                     self.error(path, error);
-                    return;
+                    return false;
                 }
             }
         }
@@ -127,6 +155,7 @@ impl Files {
             let done = if cfg!(target_arch = "wasm32") { "Downloaded" } else { "Saved" };
             self.notice = Some(Notice::Info(format!("{done} {}", files.join(", "))));
         }
+        true
     }
 }
 
@@ -141,12 +170,10 @@ fn open_files(
     if !editor.open && files.handles.is_empty() {
         return;
     }
-    for name in demos.names() {
-        let scene = effect_path(name);
-        for path in documents.files_of(&scene) {
-            if !files.handles.contains_key(&path) {
-                files.handles.insert(path.clone(), assets.load(path));
-            }
+    let scenes = demos.names().flat_map(|name| documents.files_of(&effect_path(name)));
+    for path in scenes.chain([LIST_PATH.to_string()]) {
+        if !files.handles.contains_key(&path) && documents.has_file(&path) {
+            files.handles.insert(path.clone(), assets.load(path));
         }
     }
 }
@@ -178,17 +205,23 @@ fn read_files(
 
 #[cfg(target_arch = "wasm32")]
 fn read_uploads(mut files: ResMut<Files>, mut documents: ResMut<Documents>) {
-    for (name, text) in platform::take_uploads() {
+    let mut uploads = platform::take_uploads();
+    // Scenes need their emitters, and the list needs its scenes.
+    uploads.sort_by_key(|(name, _)| (name == LIST_PATH, !is_emitter_file(name)));
+    for (name, text) in uploads {
         // Files are told apart by name; downloads don't have folders.
-        let suffix = format!("/{name}");
-        let path = files.handles.keys().find(|path| path.ends_with(&suffix)).cloned();
-        let Some(path) = path else {
-            files.error(&name, "there's no scene or emitter file with this name");
-            continue;
-        };
-        let result = text
-            .map_err(BevyError::from)
-            .and_then(|text| documents.replace(&path, &text));
+        let path = if name == LIST_PATH { name } else { format!("effects/{name}") };
+        let result = text.map_err(BevyError::from).and_then(|text| {
+            if documents.is_open(&path) {
+                return documents.replace(&path, &text);
+            }
+            if is_emitter_file(&path) {
+                return documents.add_emitter(&path, EmitterDef::from_ron(&text)?);
+            }
+            let scene = path.strip_prefix("effects/").and_then(|p| p.strip_suffix(".effect.ron"));
+            let scene = scene.ok_or("it isn't a scene or emitter file")?;
+            documents.add_scene(scene, EffectFile::from_ron(&text)?, None)
+        });
         match result {
             // Keeps showing another file's error.
             Ok(()) if matches!(files.notice, Some(Notice::Error(_))) => {}
@@ -207,11 +240,71 @@ fn keep_unsaved_changes(
     for event in events.read() {
         for name in demos.names() {
             let scene = effect_path(name);
-            let modified = demos.handle(name).is_some_and(|handle| event.is_modified(handle.id()));
+            // Added, if it was loaded again after having been removed from the list.
+            let modified = demos.handle(name).is_some_and(|handle| {
+                event.is_modified(handle.id()) || event.is_added(handle.id())
+            });
             if modified && !documents.dirty_files(Some(&scene)).is_empty() {
                 documents.touch(&scene);
             }
         }
+    }
+}
+
+/// Has the app show the scenes on the list as it's edited.
+fn update_list(
+    mut demos: ResMut<Demos>,
+    assets: Res<AssetServer>,
+    documents: Res<Documents>,
+    mut effects: ResMut<Assets<ParticleEffect>>,
+) {
+    let Some(list) = documents.list() else {
+        return;
+    };
+    // Scenes that have been saved for the first time, whose files can now be watched.
+    let saved = |name: &str, handle: &Handle<ParticleEffect>| {
+        handle.path().is_none() && documents.has_file(&effect_path(name))
+    };
+    let current = |name: &str| demos.handle(name).filter(|handle| !saved(name, handle)).cloned();
+    if demos.names().eq(list.scenes.iter().map(String::as_str))
+        && list.scenes.iter().all(|name| current(name).is_some())
+    {
+        return;
+    }
+    let scenes = list.scenes.iter().map(|name| {
+        let path = effect_path(name);
+        let handle = current(name).unwrap_or_else(|| {
+            if documents.has_file(&path) {
+                return assets.load(path);
+            }
+            match documents.build(&path, |path| assets.load(path)) {
+                Ok(effect) => effects.add(effect),
+                Err(_) => Handle::default(), // It wouldn't have been added.
+            }
+        });
+        (name.clone(), handle)
+    });
+    let scenes = scenes.collect();
+    demos.set_scenes(scenes);
+}
+
+/// Asks about unsaved changes before the window closes.
+#[cfg(not(target_arch = "wasm32"))]
+fn close_window(
+    mut requests: MessageReader<bevy::window::WindowCloseRequested>,
+    documents: Res<Documents>,
+    mut editor: ResMut<Editor>,
+    mut files: ResMut<Files>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if requests.read().count() == 0 {
+        return;
+    }
+    if documents.dirty_files(None).is_empty() {
+        exit.write(AppExit::Success);
+    } else {
+        editor.open = true;
+        files.notice = Some(Notice::Close);
     }
 }
 

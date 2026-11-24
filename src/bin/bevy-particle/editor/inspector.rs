@@ -14,6 +14,7 @@ use bevy_particle::{
 use super::{
     curves::{self, Context, Keys, Look, Value},
     documents::{document_path, texture_path, Documents},
+    manage::{self, Dialog},
     theme,
     widgets::{self, Number},
 };
@@ -75,6 +76,7 @@ pub fn show(
     selection: &mut Selection,
     documents: &mut Documents,
     ages: &Ages,
+    dialog: &mut Option<Dialog>,
 ) {
     let Some(mut file) = documents.scene(scene).cloned() else {
         return;
@@ -85,6 +87,7 @@ pub fn show(
         *selection = Selection::Scene;
     }
     show_tree(ui, &file, selection);
+    manage::emitter_buttons(ui, scene, &mut file, selection, documents);
     ui.separator();
 
     let mut emitter_file = None;
@@ -97,6 +100,9 @@ pub fn show(
             Selection::Emitter(index) => {
                 let entry = &mut file.emitters[index];
                 let age = ages.emitters.get(index).copied();
+                if manage::show_source(ui, scene, &mut entry.source, documents) {
+                    *dialog = Some(Dialog::emitter_file(scene, index, documents));
+                }
                 emitter_file = show_emitter(ui, scene, entry, documents, age);
             }
         });
@@ -118,7 +124,7 @@ fn show_tree(ui: &mut Ui, file: &EffectFile, selection: &mut Selection) {
     let rows = file.emitters.len() as f32 + 1.0;
     egui::ScrollArea::vertical()
         .id_salt("tree")
-        .max_height((rows * 24.0).min(140.0))
+        .max_height((rows * 26.0).min(156.0))
         .auto_shrink([false, true])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -914,7 +920,8 @@ mod tests {
                         ..Default::default()
                     };
                     let mut output = ctx.run_ui(input, |ui| {
-                        show(ui, &scene, &mut selection, &mut documents, &Ages::default());
+                        let ages = Ages::default();
+                        show(ui, &scene, &mut selection, &mut documents, &ages, &mut None);
                     });
                     output.textures_delta.clear();
                 }
