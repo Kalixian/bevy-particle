@@ -448,9 +448,13 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "bytemuck",
+ "js-sys",
  "naga",
  "ron",
  "serde",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

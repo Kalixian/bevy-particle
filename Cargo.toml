@@ -7,7 +7,13 @@ edition = "2024"
 default = ["editor"]
 # The demo app's editor panel. Libraries using this crate can turn it off with
 # `default-features = false`.
-editor = ["dep:bevy_egui"]
+editor = [
+    "dep:bevy_egui",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+]
 # Logs per-pass GPU timings every 2 seconds and turns vsync off: `cargo run --features profile`
 profile = []
 # Reloads shaders and effects when they're saved: `cargo run --features hot-reload`
@@ -30,6 +36,26 @@ naga = { version = "30.0.2", features = ["wgsl-in"] }
 # Compute shaders and storage buffers need WebGPU; Bevy's web default is WebGL2.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 bevy = { version = "0.20.1", default-features = false, features = ["webgpu"] }
+# For the editor's downloads and uploads.
+js-sys = { version = "0.3.107", optional = true }
+wasm-bindgen = { version = "0.2.130", optional = true }
+wasm-bindgen-futures = { version = "0.4.80", optional = true }
+web-sys = { version = "0.3.107", optional = true, features = [
+    "BeforeUnloadEvent",
+    "Blob",
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "File",
+    "FileList",
+    "HtmlAnchorElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Node",
+    "Url",
+    "Window",
+] }
 
 # Used by scripts/build-web.ps1: small downloads matter more than build time.
 [profile.web]

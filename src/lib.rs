@@ -26,7 +26,9 @@
 
 mod area;
 mod effect;
+mod effect_file;
 mod emitter;
+mod emitter_tracks;
 mod gpu;
 mod gravity;
 mod modifier;
@@ -36,16 +38,19 @@ mod render;
 mod space;
 mod spread;
 mod track;
+mod util;
 
 use bevy::prelude::*;
 
 pub use area::{Fill, SpawnArea, SpawnDirection};
 pub use effect::{EffectEmitter, EmitterDef, ParticleEffect};
-pub use emitter::ParticleEmitter;
+pub use effect_file::{EffectFile, EmitterEntry, EmitterSource, RenderFile, TextureFile};
+pub use emitter::{EmitterState, ParticleEmitter};
+pub use emitter_tracks::{AreaTracks, EmitterMotion, EmitterTracks};
 pub use gravity::{Gravity, GravityMethod, MAX_GRAVITY_BODIES};
 pub use modifier::{AttractorTarget, Blend, Modifier, Modifiers, TargetAttractor};
 pub use render::{BlendMode, ParticleRender, ParticleTexture, Playback};
-pub use space::ParticleSpace;
+pub use space::{ParticleSpace, SpaceState};
 pub use spread::{Shape, Spread};
 pub use track::{Animated, Clock, Ease, Key, Keyable, Repeat, Rgb, Track};
 
@@ -58,6 +63,7 @@ impl Plugin for ParticlePlugin {
             modifier::ModifierPlugin,
             space::SpacePlugin,
             emitter::EmitterPlugin,
+            emitter_tracks::EmitterTracksPlugin,
             gpu::ParticleGpuPlugin,
             effect::EffectPlugin,
         ));

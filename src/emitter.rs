@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     area::{SpawnArea, SpawnDirection},
+    emitter_tracks::EmitterTracks,
     gpu::GpuSimReady,
     modifier::{ModifierSystems, ModifierUpload, Modifiers, TargetAttractor},
     particle::ParticleBuffers,
@@ -46,47 +47,63 @@ pub struct EmitterSystems;
 /// Spawning happens on the GPU: each frame the CPU only sends how many particles each
 /// emitter wants; the GPU picks free slots and rolls the random initial values.
 /// If the space is full, spawns that don't fit are dropped.
-#[derive(Component, Debug, Clone, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[require(Transform, EmitterState)]
 pub struct ParticleEmitter {
     /// Particles spawned once, on the first frame after the emitter is added.
+    #[serde(skip_serializing_if = "is_default::burst_count")]
     pub burst_count: u32,
     /// Continuous spawn rate, in particles per second.
+    #[serde(skip_serializing_if = "is_default::rate")]
     pub rate: f32,
     /// Lifespan in seconds, sampled per particle. `None` = particles never die.
     ///
     /// This and the other `Spread` fields are random ranges with a distribution shape:
     /// `(1.0..2.0).into()` is uniform; see [`Spread`] and `Shape` for skewed ones.
+    #[serde(skip_serializing_if = "is_default::lifetime")]
     pub lifetime: Option<Spread>,
     /// Where particles spawn. The emitter's `Transform` moves, rotates and scales it.
+    #[serde(skip_serializing_if = "is_default::spawn")]
     pub spawn: SpawnArea,
     /// Initial speed.
+    #[serde(skip_serializing_if = "is_default::speed")]
     pub speed: Spread,
     /// Initial direction in radians, counter-clockwise from `direction`. `0.0..TAU` = any
     /// direction. An emitter mirrored by a negative scale mirrors it too.
+    #[serde(skip_serializing_if = "is_default::angle")]
     pub angle: Spread,
     /// What `angle` is measured from.
+    #[serde(skip_serializing_if = "is_default::direction")]
     pub direction: SpawnDirection,
+    #[serde(skip_serializing_if = "is_default::radius")]
     pub radius: Spread,
     /// Mass = radius × this value.
+    #[serde(skip_serializing_if = "is_default::mass_per_radius")]
     pub mass_per_radius: f32,
     /// Per-channel sRGB ranges (values above 1.0 are HDR and drive bloom).
+    #[serde(skip_serializing_if = "is_default::red")]
     pub red: Spread,
+    #[serde(skip_serializing_if = "is_default::green")]
     pub green: Spread,
+    #[serde(skip_serializing_if = "is_default::blue")]
     pub blue: Spread,
     /// Alpha range (opacity).
+    #[serde(skip_serializing_if = "is_default::alpha")]
     pub alpha: Spread,
     /// How far each particle is turned when it spawns, in radians counter-clockwise; `0.0..TAU` = any way up.
     /// Independent of `angle`. Shows on textures and stretched disks. Where
     /// `ParticleRender::stretch` turns particles along their velocity, this adds to it.
+    #[serde(skip_serializing_if = "is_default::rotation")]
     pub rotation: Spread,
     /// How fast each particle turns, in radians per second; negative = clockwise.
     /// `-1.0..1.0` = either way.
+    #[serde(skip_serializing_if = "is_default::spin")]
     pub spin: Spread,
     /// Whether this emitter's particles take part in the space's `Gravity`
     /// (attract each other and feel the pull). Brute-force cost grows with the square of
     /// all participating particles, so turn it on only for modest counts for now.
+    #[serde(skip_serializing_if = "is_default::gravity")]
     pub gravity: bool,
 }
 
@@ -113,6 +130,38 @@ impl Default for ParticleEmitter {
     }
 }
 
+/// For leaving settings that are the default out of files.
+mod is_default {
+    use super::*;
+
+    macro_rules! is_default {
+        ($($field:ident: $type:ty),* $(,)?) => {
+            $(pub fn $field(value: &$type) -> bool {
+                *value == ParticleEmitter::default().$field
+            })*
+        };
+    }
+
+    is_default! {
+        burst_count: u32,
+        rate: f32,
+        lifetime: Option<Spread>,
+        spawn: SpawnArea,
+        speed: Spread,
+        angle: Spread,
+        direction: SpawnDirection,
+        radius: Spread,
+        mass_per_radius: f32,
+        red: Spread,
+        green: Spread,
+        blue: Spread,
+        alpha: Spread,
+        rotation: Spread,
+        spin: Spread,
+        gravity: bool,
+    }
+}
+
 /// CPU-side spawn bookkeeping for one emitter.
 #[derive(Component, Debug, Default)]
 pub struct EmitterState {
@@ -122,6 +171,13 @@ pub struct EmitterState {
     /// Seconds since the emitter started, for `Track::over_time`.
     age: f32,
     warned_no_space: bool,
+}
+
+impl EmitterState {
+    /// Seconds since the emitter started: the time of its `Clock::Time` tracks.
+    pub fn age(&self) -> f32 {
+        self.age
+    }
 }
 
 /// Emitter references have 16 bits for the slot.
@@ -311,6 +367,7 @@ fn prepare_emitter_upload(
         &ParticleEmitter,
         &mut EmitterState,
         &GlobalTransform,
+        Option<&EmitterTracks>,
         Option<&Modifiers>,
         Option<&TargetAttractor>,
     )>,
@@ -323,13 +380,16 @@ fn prepare_emitter_upload(
     upload.emitters.clear();
     upload.curves.clear();
     for slot in &registry.slots {
-        let Some((entity, (emitter, mut state, transform, modifiers, attractor))) =
+        let Some((entity, (emitter, mut state, transform, tracks, modifiers, attractor))) =
             slot.entity.and_then(|e| Some((e, emitters.get_mut(e).ok()?)))
         else {
             upload.emitters.push(GpuEmitter::default());
             spawns.push((None, 0));
             continue;
         };
+
+        let tracked = tracks.map(|tracks| tracks.apply(emitter, state.age));
+        let emitter = tracked.as_ref().unwrap_or(emitter);
 
         let space = parents.iter_ancestors(entity).find(|e| is_space.contains(*e));
         if space.is_none() && !state.warned_no_space {

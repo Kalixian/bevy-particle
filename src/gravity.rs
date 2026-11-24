@@ -9,7 +9,7 @@ pub const MAX_GRAVITY_BODIES: u32 = 1 << 20;
 ///
 /// Only particles whose emitter has `gravity: true` take part: they attract each other and
 /// feel each other's pull. Other particles ignore gravity entirely.
-#[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Gravity {
     /// Gravitational constant G: acceleration = G · mass / distance².

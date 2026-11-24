@@ -2,7 +2,8 @@
 //!
 //! The left and right arrow keys step through the effects, number keys pick one of the first
 //! nine, and `R` restarts the current one. With
-//! `cargo run --features hot-reload`, saving a file restarts the effect it belongs to.
+//! `cargo run --features hot-reload`, saving a change to a file restarts the effect
+//! it belongs to.
 
 use bevy::{
     asset::{io::Reader, AssetLoader, LoadContext},
@@ -58,7 +59,7 @@ impl DemoList {
     }
 }
 
-fn effect_path(name: &str) -> String {
+pub fn effect_path(name: &str) -> String {
     format!("effects/{name}.effect.ron")
 }
 
@@ -92,6 +93,8 @@ pub struct Demos {
     scenes: Vec<(String, Handle<ParticleEffect>)>,
     /// Index of the scene on screen.
     current: usize,
+    /// The current scene as it was spawned.
+    shown: Option<ParticleEffect>,
     /// The current scene should be (re)spawned once it's loaded.
     respawn: bool,
 }
@@ -105,6 +108,10 @@ impl Demos {
     /// Index of the scene on screen.
     pub fn current(&self) -> usize {
         self.current
+    }
+
+    pub fn handle(&self, name: &str) -> Option<&Handle<ParticleEffect>> {
+        self.scenes.iter().find(|(other, _)| other == name).map(|(_, handle)| handle)
     }
 
     pub fn show(&mut self, index: usize) {
@@ -200,7 +207,8 @@ fn respawn_scene(
         .filter(|event| event.is_modified(&handle))
         .count()
         > 0;
-    demos.respawn |= reloaded;
+    // Saving a file without really changing it doesn't restart anything.
+    demos.respawn |= reloaded && effects.get(&handle) != demos.shown.as_ref();
     if !demos.respawn {
         return;
     }
@@ -208,6 +216,7 @@ fn respawn_scene(
         return; // Still loading.
     };
     demos.respawn = false;
+    demos.shown = Some(effect.clone());
 
     for space in &spaces {
         // Despawning a space despawns its child emitters too.

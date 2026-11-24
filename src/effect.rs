@@ -6,16 +6,20 @@
 
 use bevy::{
     asset::{io::Reader, AssetLoader, LoadContext},
+    platform::collections::HashMap,
     prelude::*,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::{
+    effect_file::EffectFile,
     emitter::ParticleEmitter,
+    emitter_tracks::{EmitterMotion, EmitterTracks},
     gravity::Gravity,
     modifier::{Modifiers, TargetAttractor},
-    render::{BlendMode, ParticleRender, ParticleTexture, Playback},
+    render::ParticleRender,
     space::ParticleSpace,
+    util::is_default,
 };
 
 /// Registers [`ParticleEffect`] and its loader.
@@ -29,7 +33,7 @@ impl Plugin for EffectPlugin {
 }
 
 /// A space and the emitters in it, loaded from an `.effect.ron` file. See [`Self::spawn`].
-#[derive(Asset, TypePath, Debug, Clone)]
+#[derive(Asset, TypePath, Debug, Clone, PartialEq)]
 pub struct ParticleEffect {
     pub space: ParticleSpace,
     pub render: ParticleRender,
@@ -42,21 +46,27 @@ pub struct ParticleEffect {
 }
 
 /// An emitter placed in a [`ParticleEffect`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EffectEmitter {
     /// Relative to the space.
     pub position: Vec2,
     /// Radians, counter-clockwise.
     pub rotation: f32,
+    pub motion: EmitterMotion,
     pub def: EmitterDef,
 }
 
 /// An emitter and the behaviors attached to it. Emitter files contain one of these.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EmitterDef {
+    #[serde(skip_serializing_if = "is_default")]
     pub emitter: ParticleEmitter,
+    #[serde(skip_serializing_if = "is_default")]
+    pub tracks: Option<EmitterTracks>,
+    #[serde(skip_serializing_if = "is_default")]
     pub modifiers: Modifiers,
+    #[serde(skip_serializing_if = "is_default")]
     pub attractor: Option<TargetAttractor>,
 }
 
@@ -77,7 +87,7 @@ impl ParticleEffect {
         }
         let space = space.id();
 
-        for EffectEmitter { position, rotation, def } in &self.emitters {
+        for EffectEmitter { position, rotation, motion, def } in &self.emitters {
             let mut emitter = commands.spawn((
                 ChildOf(space),
                 Transform::from_translation(position.extend(0.0))
@@ -85,99 +95,18 @@ impl ParticleEffect {
                 def.emitter.clone(),
                 def.modifiers.clone(),
             ));
+            if let Some(tracks) = &def.tracks {
+                emitter.insert(tracks.clone());
+            }
+            if !motion.is_empty() {
+                emitter.insert(motion.clone());
+            }
             if let Some(attractor) = &def.attractor {
                 emitter.insert(attractor.clone());
             }
         }
         space
     }
-}
-
-/// An effect as written in its file.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EffectFile {
-    space: ParticleSpace,
-    #[serde(default)]
-    render: RenderFile,
-    #[serde(default)]
-    gravity: Option<Gravity>,
-    #[serde(default)]
-    attractor: Option<TargetAttractor>,
-    #[serde(default)]
-    modifiers: Modifiers,
-    emitters: Vec<EmitterEntry>,
-}
-
-/// [`ParticleRender`] as written in a file.
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct RenderFile {
-    blend: BlendMode,
-    softness: f32,
-    stretch: f32,
-    texture: Option<TextureFile>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TextureFile {
-    /// Path of an image, found like [`EmitterSource::File`].
-    path: String,
-    #[serde(default = "one")]
-    columns: u32,
-    #[serde(default = "one")]
-    rows: u32,
-    #[serde(default)]
-    playback: Playback,
-}
-
-fn one() -> u32 {
-    1
-}
-
-impl RenderFile {
-    fn load(self, load_context: &mut LoadContext<'_>) -> Result<ParticleRender, BevyError> {
-        let texture = match self.texture {
-            Some(TextureFile { path, columns, rows, playback }) => {
-                let path = load_context.path().resolve_embed_str(&path)?;
-                let image = load_context.load(path);
-                Some(ParticleTexture { image, columns, rows, playback })
-            }
-            None => None,
-        };
-        Ok(ParticleRender {
-            blend: self.blend,
-            softness: self.softness,
-            stretch: self.stretch,
-            texture,
-        })
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EmitterEntry {
-    source: EmitterSource,
-    #[serde(default)]
-    position: Vec2,
-    #[serde(default)]
-    rotation: f32,
-}
-
-#[derive(Deserialize)]
-enum EmitterSource {
-    /// Path of an emitter file, relative to the effect file (or to the asset folder, with a
-    /// leading `/`).
-    File(String),
-    Inline(Box<EmitterDef>),
-}
-
-fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ron::error::SpannedError> {
-    ron::Options::default()
-        // Write `gravity: (..)` instead of `gravity: Some((..))`.
-        .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
-        .from_bytes(bytes)
 }
 
 #[derive(Default, TypePath)]
@@ -196,29 +125,24 @@ impl AssetLoader for EffectLoader {
     ) -> Result<ParticleEffect, BevyError> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
-        let file: EffectFile = parse(&bytes)?;
+        let file = EffectFile::from_ron(str::from_utf8(&bytes)?)?;
 
-        let mut emitters = Vec::with_capacity(file.emitters.len());
-        for EmitterEntry { source, position, rotation } in file.emitters {
-            let def = match source {
-                EmitterSource::Inline(def) => *def,
-                EmitterSource::File(path) => {
-                    let path = load_context.path().resolve_embed_str(&path)?;
-                    // Also makes the effect reload when the emitter file changes.
-                    let bytes = load_context.read_asset_bytes(path.clone()).await?;
-                    parse(&bytes).map_err(|error| format!("{path}: {error}"))?
-                }
-            };
-            emitters.push(EffectEmitter { position, rotation, def });
+        let path = load_context.path().clone();
+        let mut emitters = HashMap::new();
+        for path in file.emitter_paths(&path)? {
+            if !emitters.contains_key(&path) {
+                // Also makes the effect reload when the emitter file changes.
+                let bytes = load_context.read_asset_bytes(path.clone()).await?;
+                let def = EmitterDef::from_ron(str::from_utf8(&bytes)?)
+                    .map_err(|error| format!("{path}: {error}"))?;
+                emitters.insert(path, def);
+            }
         }
-        Ok(ParticleEffect {
-            space: file.space,
-            render: file.render.load(load_context)?,
-            gravity: file.gravity,
-            attractor: file.attractor,
-            modifiers: file.modifiers,
-            emitters,
-        })
+        file.build(
+            &path,
+            |path| Ok(emitters[path].clone()),
+            |path| load_context.load(path),
+        )
     }
 
     fn extensions(&self) -> &[&str] {
@@ -231,6 +155,8 @@ mod tests {
     use std::{fs, time::Duration};
 
     use bevy::asset::LoadState;
+
+    use crate::render::{BlendMode, Playback};
 
     use super::*;
 
@@ -353,8 +279,8 @@ mod tests {
             attractor: None,
             modifiers: default(),
             emitters: vec![
-                EffectEmitter { position: Vec2::X, rotation: 0.0, def: default() },
-                EffectEmitter { position: Vec2::Y, rotation: 0.0, def: default() },
+                EffectEmitter { position: Vec2::X, rotation: 0.0, motion: default(), def: default() },
+                EffectEmitter { position: Vec2::Y, rotation: 0.0, motion: default(), def: default() },
             ],
         };
         let space = effect.spawn(&mut world.commands());
@@ -374,6 +300,59 @@ mod tests {
             let saved = ron::ser::to_string(&entry.def).unwrap();
             let loaded: EmitterDef = ron::from_str(&saved).unwrap();
             assert_eq!(format!("{:?}", entry.def), format!("{loaded:?}"));
+        }
+    }
+
+    #[test]
+    fn emitter_tracks_are_read_and_spawned() {
+        let effect = load(
+            "tracks",
+            &[(
+                "test.effect.ron",
+                r#"(space: (capacity: 8), emitters: [(
+                    motion: (rotation: (clock: Time, keys: [(time: 0.0, value: 1.0)])),
+                    source: Inline((
+                        emitter: (spawn: Ring(radius: (from: 1.0, to: 2.0))),
+                        tracks: (
+                            rate: (clock: Time, repeat: Loop, keys: [(time: 0.0, value: 5.0)]),
+                            spawn: Ring(radius: (clock: Time, keys: [(time: 0.0, value: (3.0, 4.0))])),
+                        ),
+                    )),
+                )])"#,
+            )],
+            "test.effect.ron",
+        )
+        .unwrap();
+        let def = &effect.emitters[0].def;
+        assert_eq!(def.tracks.as_ref().unwrap().apply(&def.emitter, 0.0).rate, 5.0);
+        let saved = ron::ser::to_string(def).unwrap();
+        let loaded: EmitterDef = ron::from_str(&saved).unwrap();
+        assert_eq!(format!("{def:?}"), format!("{loaded:?}"));
+
+        let mut world = World::new();
+        effect.spawn(&mut world.commands());
+        world.flush();
+        assert_eq!(world.query::<(&EmitterTracks, &EmitterMotion)>().iter(&world).count(), 1);
+    }
+
+    #[test]
+    fn emitter_tracks_that_would_be_ignored_are_errors() {
+        let key = "keys: [(time: 0.0, value: 1.0)]";
+        let pair = "clock: Time, keys: [(time: 0.0, value: (1.0, 2.0))]";
+        let cases = [
+            (format!("source: Inline((tracks: (rate: (clock: Life, {key}))))"), "rate"),
+            (format!("source: Inline(()), motion: (rotation: (clock: Seconds, {key}))"), "rotation"),
+            (format!("source: Inline((tracks: (spawn: Rect(half_extents: ({pair})))))"), "area"),
+            (
+                format!("source: Inline((emitter: (lifetime: None), tracks: (lifetime: ({pair}))))"),
+                "immortal",
+            ),
+        ];
+        for (i, (emitter, expected)) in cases.iter().enumerate() {
+            let effect = format!("(space: (capacity: 8), emitters: [({emitter})])");
+            let file = ("test.effect.ron", effect.as_str());
+            let error = load(&format!("ignored_tracks{i}"), &[file], file.0).unwrap_err();
+            assert!(error.contains(expected), "{error}");
         }
     }
 

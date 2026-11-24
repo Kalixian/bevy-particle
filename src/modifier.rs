@@ -35,7 +35,7 @@ impl Plugin for ModifierPlugin {
 /// `ParticleEmitter` to pull only its own.
 ///
 /// It runs after the forces in the owner's [`Modifiers`] and doesn't change that list.
-#[derive(Component, Debug, Clone, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetAttractor {
     /// Acceleration = strength / distance², like `PointAttractor`. Negative repels.
@@ -70,7 +70,7 @@ pub enum ModifierSystems {
 /// with their owner.
 // To add one: a variant here, its arms in `kind` and `encode`, its row in `modifier_kinds.rs`,
 // and a `case` (and imports) in `particle_sim.wesl`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Modifier {
     /// Constant acceleration, e.g. wind or downward gravity.
     Acceleration(Animated<Vec2>),
@@ -141,7 +141,7 @@ impl Blend {
 }
 
 /// The modifier list of a space or emitter.
-#[derive(Component, Debug, Clone, Default, Deref, DerefMut, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Default, Deref, DerefMut, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Modifiers(pub Vec<Modifier>);
 

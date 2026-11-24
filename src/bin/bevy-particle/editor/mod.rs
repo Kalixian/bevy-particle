@@ -1,7 +1,10 @@
 //! The editor: a panel along the left edge, opened with the three dots in the top left corner
 //! and closed with them or `Escape`.
 
+mod documents;
+mod files;
 mod panel;
+mod platform;
 mod theme;
 
 use bevy::{
@@ -27,7 +30,7 @@ pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(EguiPlugin::default());
+        app.add_plugins((EguiPlugin::default(), files::FilesPlugin));
         // `spawn_ui_camera` makes the context instead.
         app.world_mut()
             .resource_mut::<EguiGlobalSettings>()

@@ -1,8 +1,15 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
-use super::{theme, Editor};
-use crate::{demos::Demos, input::InputCapture};
+use super::{
+    documents::Documents,
+    files::{Files, Notice},
+    theme, Editor,
+};
+use crate::{
+    demos::{effect_path, Demos},
+    input::InputCapture,
+};
 
 const MARGIN: i8 = 8;
 const DOTS_SIZE: egui::Vec2 = egui::Vec2::splat(28.0);
@@ -12,6 +19,8 @@ pub(super) fn show(
     mut contexts: EguiContexts,
     mut editor: ResMut<Editor>,
     mut demos: ResMut<Demos>,
+    mut documents: ResMut<Documents>,
+    mut files: ResMut<Files>,
     capture: Res<InputCapture>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -44,7 +53,11 @@ pub(super) fn show(
         .size_range(240.0..=max_width)
         .frame(egui::Frame::new().fill(theme::PANEL_FILL).inner_margin(MARGIN))
         .show(&mut root, |ui| {
-            show_header(ui, &mut editor, &mut demos);
+            show_header(ui, &mut editor, &mut demos, &documents);
+            let scene = demos.names().nth(demos.current()).map(effect_path);
+            if let Some(scene) = scene {
+                show_files(ui, &scene, &mut documents, &mut files);
+            }
             ui.separator();
             ui.weak("Scene and emitter settings will go here.");
             // Keeps the panel as wide as it was dragged.
@@ -65,14 +78,24 @@ fn show_closed(ctx: &egui::Context, editor: &mut Editor) {
         });
 }
 
-fn show_header(ui: &mut egui::Ui, editor: &mut Editor, demos: &mut Demos) {
+fn show_header(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    demos: &mut Demos,
+    documents: &Documents,
+) {
     ui.horizontal(|ui| {
         if dots_button(ui, "Close the editor (Esc)").clicked() {
             editor.open = false;
         }
         let current = demos.current();
         let mut picked = current;
-        let name = demos.names().nth(current).unwrap_or("Loading…").to_string();
+        // Scenes with unsaved changes are marked.
+        let label = |name: &str| {
+            let unsaved = !documents.dirty_files(Some(&effect_path(name))).is_empty();
+            format!("{name}{}", if unsaved { " *" } else { "" })
+        };
+        let name = demos.names().nth(current).map_or("Loading…".into(), label);
         let width = ui.available_width() - RESTART_WIDTH - ui.spacing().item_spacing.x;
         egui::ComboBox::from_id_salt("scene")
             .width(width)
@@ -81,7 +104,7 @@ fn show_header(ui: &mut egui::Ui, editor: &mut Editor, demos: &mut Demos) {
             .selected_text(name)
             .show_ui(ui, |ui| {
                 for (index, name) in demos.names().enumerate() {
-                    ui.selectable_value(&mut picked, index, name);
+                    ui.selectable_value(&mut picked, index, label(name));
                 }
             });
         if picked != current {
@@ -92,6 +115,97 @@ fn show_header(ui: &mut egui::Ui, editor: &mut Editor, demos: &mut Demos) {
             demos.restart();
         }
     });
+}
+
+/// Saving, and what there is to say about it.
+fn show_files(ui: &mut egui::Ui, scene: &str, documents: &mut Documents, files: &mut Files) {
+    if !documents.is_open(scene) {
+        ui.weak("Loading…");
+    }
+    let dirty = documents.dirty_files(Some(scene));
+    let conflict = documents.conflict_in(scene);
+    ui.horizontal_wrapped(|ui| {
+        let save = if cfg!(target_arch = "wasm32") { "Download" } else { "Save" };
+        let can_save = !dirty.is_empty() && conflict.is_none();
+        let button = ui.add_enabled(can_save, egui::Button::new(save));
+        if button.on_hover_text(dirty.join("\n")).clicked() {
+            files.save(documents, Some(scene), false);
+        }
+        let button = ui.add_enabled(!dirty.is_empty(), egui::Button::new("Revert"));
+        if button.on_hover_text("Drop the unsaved changes").clicked() {
+            for path in &dirty {
+                documents.revert(path);
+            }
+            files.notice = None;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let any = !documents.dirty_files(None).is_empty();
+            if ui.add_enabled(any, egui::Button::new("Download all changed")).clicked() {
+                files.save(documents, None, false);
+            }
+            let button = ui.button("Load files…");
+            let hint = "Replaces scenes and emitters by downloaded ones with the same name";
+            if button.on_hover_text(hint).clicked() {
+                files.notice = super::platform::pick_files()
+                    .err()
+                    .map(|error| Notice::Error(error.to_string()));
+            }
+        }
+    });
+
+    for path in &dirty {
+        let mut others = documents.scenes_using(path);
+        others.retain(|other| other != scene);
+        if !others.is_empty() {
+            let others = others.join(", ");
+            ui.colored_label(theme::WARNING, format!("{path} is also used by {others}."));
+        }
+    }
+    if let Some(path) = conflict {
+        ui.colored_label(theme::WARNING, format!("{path} was changed outside the editor."));
+        ui.horizontal(|ui| {
+            let mine = ui.button("Keep mine").clicked();
+            if (mine || ui.button("Use the file's").clicked())
+                && let Err(error) = documents.resolve(&path, mine)
+            {
+                files.notice = Some(Notice::Error(error.to_string()));
+            }
+        });
+    }
+    show_notice(ui, documents, files);
+}
+
+fn show_notice(ui: &mut egui::Ui, documents: &mut Documents, files: &mut Files) {
+    let mut dismissed = false;
+    let mut confirmed = None;
+    match &files.notice {
+        None => return,
+        Some(Notice::Info(text)) => {
+            ui.weak(text);
+            dismissed = ui.small_button("OK").clicked();
+        }
+        Some(Notice::Error(text)) => {
+            ui.colored_label(theme::ERROR, text);
+            dismissed = ui.small_button("OK").clicked();
+        }
+        Some(Notice::Comments { scene, files }) => {
+            let text = format!("Saving removes the comments in {}.", files.join(", "));
+            ui.colored_label(theme::WARNING, text);
+            ui.horizontal(|ui| {
+                if ui.button("Save anyway").clicked() {
+                    confirmed = Some(scene.clone());
+                }
+                dismissed = ui.button("Cancel").clicked();
+            });
+        }
+    }
+    if dismissed {
+        files.notice = None;
+    }
+    if let Some(scene) = confirmed {
+        files.save(documents, scene.as_deref(), true);
+    }
 }
 
 /// The dots are drawn, rather than being text, so that they don't depend on the font.

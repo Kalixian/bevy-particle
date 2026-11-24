@@ -1,0 +1,99 @@
+// Keyframed emitters. In the middle, a ring that grows, shrinks and changes color as it fires
+// bursts; around it, two jets that swing and widen while they chase each other around a diamond.
+(
+    space: (capacity: 200000),
+    render: (blend: Additive, softness: 1.0, stretch: 0.03),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(500.0)),
+    modifiers: [
+        Drag(Constant(0.6)),
+        Alpha(Scale, Track((clock: Life, keys: [(time: 0.0, value: 0.0), (time: 0.1, value: 1.0), (time: 1.0, value: 0.0)]))),
+    ],
+    emitters: [
+        (source: Inline((
+            emitter: (
+                lifetime: (from: 1.0, to: 2.0),
+                spawn: Ring(radius: (from: 60.0, to: 64.0)), direction: Outward,
+                angle: (from: -0.2, to: 0.2),
+                radius: (from: 0.8, to: 2.2, shape: Low(2.0)),
+                alpha: (from: 0.2, to: 0.5),
+            ),
+            tracks: (
+                // A burst every second and a half.
+                rate: (clock: Time, repeat: Loop, keys: [
+                    (time: 0.0, value: 90000.0, ease: Smooth),
+                    (time: 0.4, value: 500.0),
+                    (time: 1.5, value: 500.0),
+                ]),
+                speed: (clock: Time, repeat: PingPong, keys: [
+                    (time: 0.0, value: (20.0, 120.0), ease: Smooth),
+                    (time: 6.0, value: (150.0, 420.0), ease: Smooth),
+                ]),
+                spawn: Ring(radius: (clock: Time, repeat: PingPong, keys: [
+                    (time: 0.0, value: (40.0, 44.0), ease: Smooth),
+                    (time: 4.0, value: (170.0, 180.0), ease: Smooth),
+                ])),
+                red: (clock: Time, repeat: PingPong, keys: [(time: 0.0, value: (0.1, 0.3)), (time: 5.0, value: (1.2, 1.6))]),
+                green: (clock: Time, repeat: PingPong, keys: [(time: 0.0, value: (0.6, 1.0)), (time: 5.0, value: (0.2, 0.5))]),
+                blue: (clock: Time, repeat: PingPong, keys: [(time: 0.0, value: (1.2, 1.6)), (time: 5.0, value: (0.3, 0.6))]),
+            ),
+        ))),
+        (
+            motion: (
+                position: (clock: Time, repeat: Loop, keys: [
+                    (time: 0.0, value: (-430.0, 0.0), ease: Smooth),
+                    (time: 2.0, value: (0.0, 230.0), ease: Smooth),
+                    (time: 4.0, value: (430.0, 0.0), ease: Smooth),
+                    (time: 6.0, value: (0.0, -230.0), ease: Smooth),
+                    (time: 8.0, value: (-430.0, 0.0)),
+                ]),
+                rotation: (clock: Time, repeat: PingPong, keys: [
+                    (time: 0.0, value: 0.8, ease: Smooth),
+                    (time: 1.7, value: 2.3, ease: Smooth),
+                ]),
+            ),
+            source: Inline((
+                emitter: (
+                    rate: 9000.0, lifetime: (from: 0.8, to: 1.6),
+                    speed: (from: 150.0, to: 320.0), angle: (from: -0.1, to: 0.1),
+                    radius: (from: 0.8, to: 2.0),
+                    red: (from: 1.2, to: 1.5), green: (from: 0.5, to: 0.8), blue: (from: 0.1, to: 0.2), alpha: (from: 0.2, to: 0.6),
+                ),
+                tracks: (
+                    angle: (clock: Time, repeat: PingPong, keys: [
+                        (time: 0.0, value: (-0.05, 0.05), ease: Smooth),
+                        (time: 3.0, value: (-0.6, 0.6), ease: Smooth),
+                    ]),
+                ),
+            )),
+        ),
+        (
+            motion: (
+                position: (clock: Time, repeat: Loop, keys: [
+                    (time: 0.0, value: (430.0, 0.0), ease: Smooth),
+                    (time: 2.0, value: (0.0, -230.0), ease: Smooth),
+                    (time: 4.0, value: (-430.0, 0.0), ease: Smooth),
+                    (time: 6.0, value: (0.0, 230.0), ease: Smooth),
+                    (time: 8.0, value: (430.0, 0.0)),
+                ]),
+                rotation: (clock: Time, repeat: PingPong, keys: [
+                    (time: 0.0, value: 0.8, ease: Smooth),
+                    (time: 1.7, value: 2.3, ease: Smooth),
+                ]),
+            ),
+            source: Inline((
+                emitter: (
+                    rate: 9000.0, lifetime: (from: 0.8, to: 1.6),
+                    speed: (from: 150.0, to: 320.0), angle: (from: -0.1, to: 0.1),
+                    radius: (from: 0.8, to: 2.0),
+                    red: (from: 0.4, to: 0.6), green: (from: 1.0, to: 1.3), blue: (from: 0.3, to: 0.5), alpha: (from: 0.2, to: 0.6),
+                ),
+                tracks: (
+                    angle: (clock: Time, repeat: PingPong, keys: [
+                        (time: 0.0, value: (-0.05, 0.05), ease: Smooth),
+                        (time: 3.0, value: (-0.6, 0.6), ease: Smooth),
+                    ]),
+                ),
+            )),
+        ),
+    ],
+)

@@ -14,6 +14,8 @@ use std::ops::Range;
 use bevy::{prelude::*, render::render_resource::ShaderType};
 use serde::{Deserialize, Serialize};
 
+use crate::util::is_default;
+
 /// Points per lookup table. Must match `CURVE_SAMPLES` in `particle_sim.wesl`.
 pub const CURVE_SAMPLES: usize = 32;
 /// Curve index meaning "uniform, no table". Must match `NO_CURVE` in `particle_sim.wesl`.
@@ -25,7 +27,7 @@ pub const NO_CURVE: u32 = u32::MAX;
 /// radius: (0.5..2.0).into(),                              // uniform
 /// radius: Spread::new(0.5..8.0, Shape::Falloff(6.0)),    // mostly small, a few large
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "SpreadData", into = "SpreadData")]
 pub struct Spread {
     pub range: Range<f32>,
@@ -38,7 +40,7 @@ pub struct Spread {
 struct SpreadData {
     from: f32,
     to: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     shape: Shape,
 }
 
@@ -101,6 +103,21 @@ pub enum Shape {
     /// Code only: it can't be loaded from or saved to a data file.
     #[serde(skip)]
     Custom(fn(f32) -> f32),
+}
+
+/// Custom shapes are equal if they're the same function, as far as that can be told.
+impl PartialEq for Shape {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Uniform, Self::Uniform) => true,
+            (Self::Low(a), Self::Low(b))
+            | (Self::High(a), Self::High(b))
+            | (Self::Middle(a), Self::Middle(b))
+            | (Self::Falloff(a), Self::Falloff(b)) => a == b,
+            (Self::Custom(a), Self::Custom(b)) => std::ptr::fn_addr_eq(*a, *b),
+            _ => false,
+        }
+    }
 }
 
 impl Shape {

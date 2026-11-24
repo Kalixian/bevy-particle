@@ -5,23 +5,26 @@ use std::f32::consts::TAU;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::spread::{GpuCurve, Spread, NO_CURVE};
+use crate::{
+    spread::{GpuCurve, Spread, NO_CURVE},
+    util::is_default,
+};
 
 /// The area an emitter spawns particles in, centered on the emitter and moved, rotated and
 /// scaled by its `Transform`. Particles are spread evenly over it, unless noted otherwise.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum SpawnArea {
     #[default]
     Point,
     Rect {
         half_extents: Vec2,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_default")]
         fill: Fill,
     },
     Ellipse {
         radii: Vec2,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_default")]
         fill: Fill,
     },
     /// A ring, disk (`radius: 0.0..r`), or a slice of either.
@@ -29,7 +32,7 @@ pub enum SpawnArea {
         /// Uniform covers the area evenly; other shapes favor smaller or larger radii.
         radius: Spread,
         /// Radians counter-clockwise from the emitter's +X. All around if left out of a file.
-        #[serde(default = "full_circle")]
+        #[serde(default = "full_circle", skip_serializing_if = "is_full_circle")]
         arc: Spread,
     },
     /// Both ends are relative to the emitter.
@@ -67,6 +70,10 @@ impl SpawnDirection {
 
 fn full_circle() -> Spread {
     (0.0..TAU).into()
+}
+
+fn is_full_circle(arc: &Spread) -> bool {
+    *arc == full_circle()
 }
 
 // Must match the same constants in `particle_sim.wesl`.

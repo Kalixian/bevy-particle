@@ -1,11 +1,12 @@
 //! Keyframe tracks: values that change over time, interpolated between keys.
 //!
-//! Any modifier parameter is an [`Animated`], either a constant or a [`Track`].
+//! Any modifier parameter is an [`Animated`], either a constant or a [`Track`]. Emitters have
+//! tracks too; see `emitter_tracks.rs`.
 
 use bevy::{prelude::*, render::render_resource::ShaderType};
 use serde::{Deserialize, Serialize};
 
-use crate::modifier_kinds::ParamDef;
+use crate::{modifier_kinds::ParamDef, util::is_default};
 
 /// A type that can be keyframed. Values are interpolated as (up to) four floats.
 pub trait Keyable: Copy {
@@ -72,13 +73,13 @@ pub enum Repeat {
 }
 
 /// Written as `(time, value)` or `(time, value, ease)` in code.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Key<T> {
-    time: f32,
-    value: T,
-    #[serde(default)]
-    ease: Ease,
+    pub time: f32,
+    pub value: T,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub ease: Ease,
 }
 
 impl<T> From<(f32, T)> for Key<T> {
@@ -100,12 +101,13 @@ impl<T> From<(f32, T, Ease)> for Key<T> {
 /// Track::over_life([(0.0, 0.0), (0.2, 1.0), (1.0, 0.0)])
 /// Track::over_time([(0.0, 10.0), (1.0, 50.0)]).ping_pong().ease(Ease::Smooth)
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "TrackData<T>")]
 pub struct Track<T> {
+    pub clock: Clock,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub repeat: Repeat,
     keys: Vec<Key<T>>,
-    clock: Clock,
-    repeat: Repeat,
 }
 
 /// A [`Track`] as read from data files, with its keys not yet sorted.
@@ -127,6 +129,22 @@ impl<T> From<TrackData<T>> for Track<T> {
 }
 
 impl<T> Track<T> {
+    /// Sorted by time.
+    pub fn keys(&self) -> &[Key<T>] {
+        &self.keys
+    }
+
+    /// Replaces the keys, which don't have to be sorted.
+    pub fn set_keys(&mut self, keys: Vec<Key<T>>) {
+        self.keys = keys;
+        self.sort_keys();
+    }
+
+    /// Whether it's keyed on `Clock::Time`.
+    pub(crate) fn is_over_time(&self) -> bool {
+        self.clock == Clock::Time
+    }
+
     /// Stable, so keys at the same time keep their written order.
     fn sort_keys(&mut self) {
         self.keys.sort_by(|a, b| a.time.total_cmp(&b.time));
@@ -182,6 +200,12 @@ impl<T: Keyable> Track<T> {
         if self.clock == Clock::Life { Repeat::Once } else { self.repeat }
     }
 
+    /// The value when the owner is `age` seconds old, or `None` if there are no keys or they aren't
+    /// on `Clock::Time`.
+    pub(crate) fn sample_time(&self, age: f32) -> Option<Vec4> {
+        if self.is_over_time() { self.sample(age) } else { None }
+    }
+
     /// The value at clock time `t`, or `None` with no keys. Must match `sample_track` in
     /// `tracks.wesl`.
     fn sample(&self, t: f32) -> Option<Vec4> {
@@ -212,7 +236,7 @@ impl<T: Keyable> Track<T> {
 }
 
 /// A modifier parameter: a constant or a [`Track`]. Build either with `.into()`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Animated<T> {
     Constant(T),
     Track(Track<T>),

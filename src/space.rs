@@ -48,7 +48,7 @@ impl Plugin for SpacePlugin {
 /// [`ParticleRender`] sets how their particles look. Each has
 /// its own GPU buffers, and gravity buffers only while it has [`Gravity`]. Despawning a space
 /// (which also despawns its emitters) frees its particles.
-#[derive(Component, Debug, Clone, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[require(Transform, Visibility, SpaceState)]
 pub struct ParticleSpace {
@@ -63,6 +63,13 @@ pub struct ParticleSpace {
 pub struct SpaceState {
     /// Seconds since the space started, for `Track::over_time`.
     age: f32,
+}
+
+impl SpaceState {
+    /// Seconds since the space started: the time of its `Clock::Time` tracks.
+    pub fn age(&self) -> f32 {
+        self.age
+    }
 }
 
 /// Per-frame simulation uniforms. Must match `struct SimParams` in `types.wesl`.
@@ -318,6 +325,33 @@ mod tests {
         assert_eq!(uploads(&app), [(10, 3), (20, 4), (30, 5)]);
         app.update();
         assert_eq!(uploads(&app), [(10, 0), (20, 0), (30, 0)]);
+    }
+
+    #[test]
+    fn emitter_rates_follow_their_tracks() {
+        use crate::{emitter_tracks::EmitterTracks, track::{Ease, Track}};
+        let mut app = app();
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_millis(100),
+        ));
+        // Off for 0.25 s, then 100 per second.
+        let rate = Track::over_time([(0.0, 0.0, Ease::Step), (0.25, 100.0, Ease::Step)]);
+        app.world_mut().spawn((
+            space(1000),
+            children![(
+                ParticleEmitter { rate: 7000.0, ..default() },
+                EmitterTracks { rate: Some(rate), ..default() },
+            )],
+        ));
+        app.update();
+        simulate_all(&mut app);
+        let spawned: Vec<_> = (0..5)
+            .map(|_| {
+                app.update();
+                uploads(&app)[0].1
+            })
+            .collect();
+        assert_eq!(spawned, [0, 0, 0, 10, 10]);
     }
 
     #[test]
