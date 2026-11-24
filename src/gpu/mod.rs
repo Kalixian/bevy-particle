@@ -6,7 +6,7 @@ mod draw;
 mod gravity;
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc,
 };
 
@@ -58,22 +58,28 @@ fn extract_buffer_removal(
     }
 }
 
-/// Set once the simulation compute passes have run with the current space's buffers.
-/// Emitters hold their spawns until then, so nothing is requested before the GPU can act on it.
-#[derive(Resource, Clone, Default)]
-pub struct GpuSimReady(Arc<AtomicBool>);
+/// The space whose buffers the simulation compute passes last ran with. Emitters hold their
+/// spawns until it's theirs, so nothing is requested before the GPU can act on it.
+///
+/// It names the space, rather than being a flag reset for each new one, because rendering is
+/// pipelined: the render world may still be finishing a frame of the previous space when the
+/// main world creates the next.
+#[derive(Resource, Clone)]
+pub struct GpuSimReady(Arc<AtomicU64>);
+
+impl Default for GpuSimReady {
+    fn default() -> Self {
+        Self(Arc::new(AtomicU64::new(Entity::PLACEHOLDER.to_bits())))
+    }
+}
 
 impl GpuSimReady {
-    pub fn get(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+    /// Whether `space` has been simulated with its current buffers.
+    pub fn is_simulating(&self, space: Entity) -> bool {
+        self.0.load(Ordering::Relaxed) == space.to_bits()
     }
 
-    fn set(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    /// Called when the space's buffers are replaced; the next simulated frame sets it again.
-    pub fn reset(&self) {
-        self.0.store(false, Ordering::Relaxed);
+    fn set(&self, space: Entity) {
+        self.0.store(space.to_bits(), Ordering::Relaxed);
     }
 }

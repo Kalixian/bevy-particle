@@ -32,15 +32,25 @@ fn main() {
 }
 
 fn default_plugins() -> impl PluginGroup {
-    // Profiling measures uncapped frame times, so vsync goes off.
-    #[cfg(feature = "profile")]
-    return DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            present_mode: bevy::window::PresentMode::AutoNoVsync,
-            ..default()
-        }),
-        ..default()
-    });
-    #[cfg(not(feature = "profile"))]
     DefaultPlugins
+        .set(WindowPlugin {
+            primary_window: Some(Window {
+                // Profiling measures uncapped frame times, so vsync goes off.
+                #[cfg(feature = "profile")]
+                present_mode: bevy::window::PresentMode::AutoNoVsync,
+                // Web only: fill the page's canvas (see web/index.html), and leave browser
+                // shortcuts such as F5 and F12 working.
+                canvas: Some("#bevy".into()),
+                fit_canvas_to_parent: true,
+                prevent_default_event_handling: false,
+                ..default()
+            }),
+            ..default()
+        })
+        .set(AssetPlugin {
+            // There are no .meta files; looking for them costs a failed request per asset on
+            // the web, and confuses hosts that answer missing files with a page.
+            meta_check: bevy::asset::AssetMetaCheck::Never,
+            ..default()
+        })
 }

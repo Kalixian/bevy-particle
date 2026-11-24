@@ -237,12 +237,14 @@ fn dispatch_sim(
     gravity_bind_groups: Option<Res<GravityBindGroups>>,
     gravity_buffers: Option<Res<GravityBuffers>>,
     params: Res<SimParams>,
+    particle_buffers: Option<Res<ParticleBuffers>>,
     ready: Res<GpuSimReady>,
 ) {
     let (
         Some(bind_groups),
         Some(gravity_bind_groups),
         Some(gravity_buffers),
+        Some(particle_buffers),
         Some(compact),
         Some(integrate),
         Some(spawn),
@@ -250,6 +252,7 @@ fn dispatch_sim(
         bind_groups,
         gravity_bind_groups,
         gravity_buffers,
+        particle_buffers,
         pipeline_cache.get_compute_pipeline(pipelines.compact),
         pipeline_cache.get_compute_pipeline(pipelines.integrate),
         pipeline_cache.get_compute_pipeline(pipelines.spawn),
@@ -317,5 +320,5 @@ fn dispatch_sim(
     }
 
     total_span.end(&mut pass);
-    ready.set();
+    ready.set(particle_buffers.space);
 }

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bevy-particle</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    #stage { position: fixed; inset: 0; }
+    #bevy { display: block; outline: none; touch-action: none; }
+    #message {
+      position: fixed; inset: 0; display: grid; place-items: center; padding: 2rem;
+      color: #ccc; font: 16px system-ui, sans-serif; text-align: center; pointer-events: none;
+    }
+    #message[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="stage"><canvas id="bevy" tabindex="0"></canvas></div>
+  <div id="message" role="status">Loading…</div>
+  <script type="module">
+    const message = document.getElementById("message");
+    const fail = (text) => { message.textContent = text; message.hidden = false; };
+
+    async function start() {
+      if (location.protocol === "file:") {
+        return fail("Open this page through a web server; browsers block it when opened as a file.");
+      }
+      if (!window.isSecureContext) {
+        return fail("WebGPU needs a secure page: use https, or localhost.");
+      }
+      if (!(await navigator.gpu?.requestAdapter())) {
+        return fail("This demo needs WebGPU, which this browser or device doesn't provide.");
+      }
+      const { default: init } = await import("./bevy-particle.js");
+      try {
+        await init();
+      } catch (error) {
+        // winit leaves Rust's main by throwing; that one is how a normal start looks.
+        if (!String(error).includes("Using exceptions for control flow")) throw error;
+      }
+      message.hidden = true;
+      document.getElementById("bevy").focus();
+    }
+
+    start().catch((error) => {
+      console.error(error);
+      fail("The demo failed to start. See the browser console for details.");
+    });
+  </script>
+</body>
+</html>

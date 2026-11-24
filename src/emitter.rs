@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     gpu::GpuSimReady,
     modifier::{ModifierSystems, ModifierUpload, Modifiers, MouseAttractor},
+    particle::ParticleBuffers,
     spread::{GpuCurve, Spread, NO_CURVE},
 };
 
@@ -201,6 +202,7 @@ fn prepare_emitter_upload(
     time: Res<Time>,
     registry: Res<EmitterRegistry>,
     sim_ready: Res<GpuSimReady>,
+    particle_buffers: Option<Res<ParticleBuffers>>,
     mut emitters: Query<(
         &ParticleEmitter,
         &mut EmitterState,
@@ -211,10 +213,10 @@ fn prepare_emitter_upload(
     mut upload: ResMut<EmitterUpload>,
     mut modifier_upload: ResMut<ModifierUpload>,
 ) {
-    // Hold spawns (bursts included) until the GPU simulation is actually running,
-    // otherwise they'd be requested while the compute pipelines are still compiling and lost.
-    let dt = if sim_ready.get() { time.delta_secs() } else { 0.0 };
-    let can_burst = sim_ready.get();
+    // Hold spawns (bursts included) until the GPU is actually simulating this space. Before
+    // that (pipelines compiling, buffers not created yet) they'd be lost.
+    let can_burst = particle_buffers.is_some_and(|b| sim_ready.is_simulating(b.space));
+    let dt = if can_burst { time.delta_secs() } else { 0.0 };
     let mut spawn_total = 0u32;
 
     upload.emitters.clear();

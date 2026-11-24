@@ -10,8 +10,22 @@ profile = []
 hot-reload = ["bevy/file_watcher"]
 
 [dependencies]
-bevy = { version = "0.20.1", features = ["serialize"] }
+# Only the 2D parts of Bevy, which keeps builds and the web download smaller. The camera's
+# tonemapper needs tonemapping_luts, which is zstd-compressed.
+bevy = { version = "0.20.1", default-features = false, features = ["2d", "serialize", "tonemapping_luts", "zstd_rust"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
-rand = "0.10.4"
 ron = "0.12.3"
 serde = { version = "1.0.229", features = ["derive"] }
+
+# Compute shaders and storage buffers need WebGPU; Bevy's web default is WebGL2.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { version = "0.20.1", default-features = false, features = ["webgpu"] }
+
+# Used by scripts/build-web.ps1: small downloads matter more than build time.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+# Function names are removed later, by wasm-bindgen.
+strip = "debuginfo"

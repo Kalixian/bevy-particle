@@ -90,7 +90,6 @@ fn sync_space_buffers(
     added: Query<(Entity, &ParticleSpace), Added<ParticleSpace>>,
     mut removed: RemovedComponents<ParticleSpace>,
     existing: Option<Res<ParticleBuffers>>,
-    sim_ready: Res<GpuSimReady>,
 ) {
     let owner_removed = existing
         .as_ref()
@@ -106,8 +105,6 @@ fn sync_space_buffers(
             continue;
         }
         has_buffers = true;
-        // The GPU hasn't simulated these buffers yet; emitters wait until it has.
-        sim_ready.reset();
         let capacity = space.capacity;
         info!("Allocating {capacity} particle slots");
 
@@ -159,7 +156,7 @@ fn update_sim_params(
     };
     let (modifier_offset, modifier_count) =
         modifier_upload.push(modifiers, mouse, transform.translation().truncate(), state.age);
-    if sim_ready.get() {
+    if sim_ready.is_simulating(buffers.space) {
         state.age += time.delta_secs();
     }
 
