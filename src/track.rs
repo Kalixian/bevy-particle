@@ -208,7 +208,7 @@ impl<T: Keyable> Track<T> {
 
     /// The value at clock time `t`, or `None` with no keys. Must match `sample_track` in
     /// `tracks.wesl`.
-    fn sample(&self, t: f32) -> Option<Vec4> {
+    pub fn sample(&self, t: f32) -> Option<Vec4> {
         let period = self.keys.last()?.time;
         let t = match self.repeat() {
             Repeat::Loop if period > 0.0 => t.rem_euclid(period),

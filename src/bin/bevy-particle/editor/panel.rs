@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
+use bevy_particle::{EmitterState, SpaceState};
 
 use super::{
     documents::Documents,
@@ -24,6 +25,8 @@ pub(super) fn show(
     mut documents: ResMut<Documents>,
     mut files: ResMut<Files>,
     capture: Res<InputCapture>,
+    spaces: Query<(&SpaceState, Option<&Children>)>,
+    emitters: Query<&EmitterState>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     if !editor.themed {
@@ -42,6 +45,17 @@ pub(super) fn show(
         return Ok(());
     }
 
+    let ages = match spaces.single() {
+        Ok((space, children)) => inspector::Ages {
+            scene: Some(space.age()),
+            emitters: children
+                .into_iter()
+                .flatten()
+                .filter_map(|child| Some(emitters.get(*child).ok()?.age()))
+                .collect(),
+        },
+        Err(_) => default(),
+    };
     let window = ctx.viewport_rect();
     let mut root = egui::Ui::new(
         ctx.clone(),
@@ -64,7 +78,8 @@ pub(super) fn show(
                 if editor.selection.0 != scene {
                     editor.selection = (scene.clone(), default());
                 }
-                inspector::show(ui, &scene, &mut editor.selection.1, &mut documents);
+                let selection = &mut editor.selection.1;
+                inspector::show(ui, &scene, selection, &mut documents, &ages);
             }
             // Keeps the panel as wide as it was dragged.
             ui.take_available_space();

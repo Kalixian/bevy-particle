@@ -1,6 +1,7 @@
 //! The editor: a panel along the left edge, opened with the three dots in the top left corner
 //! and closed with them or `Escape`.
 
+mod curves;
 mod documents;
 mod files;
 mod inspector;

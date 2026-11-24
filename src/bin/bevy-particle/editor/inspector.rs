@@ -5,12 +5,14 @@ use std::collections::BTreeSet;
 use bevy::{asset::AssetPath, math::Vec2};
 use bevy_egui::egui::{self, Ui};
 use bevy_particle::{
-    Animated, Blend, BlendMode, EffectFile, EmitterDef, EmitterEntry, EmitterSource, Fill, Gravity,
-    GravityMethod, Keyable, Modifier, Modifiers, ParticleEmitter, Phase, Playback, RenderFile, Rgb,
-    SpawnArea, SpawnDirection, Spread, TargetAttractor, TextureFile, Track,
+    Animated, AreaTracks, Blend, BlendMode, EffectFile, EmitterDef, EmitterEntry, EmitterSource,
+    EmitterTracks, Fill, Gravity, GravityMethod, Modifier, Modifiers, ParticleEmitter, Phase,
+    Playback, RenderFile, Rgb, SpawnArea, SpawnDirection, Spread, TargetAttractor, TextureFile,
+    Track,
 };
 
 use super::{
+    curves::{self, Context, Keys, Look, Value},
     documents::{document_path, texture_path, Documents},
     theme,
     widgets::{self, Number},
@@ -32,7 +34,48 @@ pub enum Selection {
     Emitter(usize),
 }
 
-pub fn show(ui: &mut Ui, scene: &str, selection: &mut Selection, documents: &mut Documents) {
+/// How long the parts of the scene on screen have been running.
+#[derive(Debug, Default)]
+pub struct Ages {
+    pub scene: Option<f32>,
+    pub emitters: Vec<f32>,
+}
+
+/// What surrounds the modifiers and emitter settings being shown.
+#[derive(Clone, Copy)]
+struct Owner {
+    age: Option<f32>,
+    /// Whether any of its particles never die.
+    immortal: bool,
+}
+
+impl Owner {
+    /// For keyframes of the owner itself.
+    fn context(self) -> Context<'static> {
+        Context { time_only: true, age: self.age, life_warning: None }
+    }
+
+    /// For keyframes of modifier parameters.
+    fn modifier_context(self, phase: Phase) -> Context<'static> {
+        let warning = match phase {
+            Phase::Appearance => "Doesn't affect immortal particles, which some of these are.",
+            _ => "Stays at its start for immortal particles, which some of these are.",
+        };
+        Context {
+            time_only: false,
+            age: self.age,
+            life_warning: self.immortal.then_some(warning),
+        }
+    }
+}
+
+pub fn show(
+    ui: &mut Ui,
+    scene: &str,
+    selection: &mut Selection,
+    documents: &mut Documents,
+    ages: &Ages,
+) {
     let Some(mut file) = documents.scene(scene).cloned() else {
         return;
     };
@@ -50,10 +93,11 @@ pub fn show(ui: &mut Ui, scene: &str, selection: &mut Selection, documents: &mut
         ui.set_max_width(ui.available_width() - 10.0);
         // What widgets remember is about this file and this part of it.
         ui.push_id((scene, format!("{selection:?}")), |ui| match *selection {
-            Selection::Scene => show_scene(ui, scene, &mut file, documents),
+            Selection::Scene => show_scene(ui, scene, &mut file, documents, ages.scene),
             Selection::Emitter(index) => {
                 let entry = &mut file.emitters[index];
-                emitter_file = show_emitter(ui, scene, entry, documents);
+                let age = ages.emitters.get(index).copied();
+                emitter_file = show_emitter(ui, scene, entry, documents, age);
             }
         });
     });
@@ -102,7 +146,20 @@ fn section(ui: &mut Ui, name: &str, add: impl FnOnce(&mut Ui)) {
         .show_unindented(ui, add);
 }
 
-fn show_scene(ui: &mut Ui, scene: &str, file: &mut EffectFile, documents: &Documents) {
+fn show_scene(
+    ui: &mut Ui,
+    scene: &str,
+    file: &mut EffectFile,
+    documents: &Documents,
+    age: Option<f32>,
+) {
+    let immortal = file.emitters.iter().any(|entry| match &entry.source {
+        EmitterSource::Inline(def) => def.emitter.lifetime.is_none(),
+        EmitterSource::File(path) => emitter_path(scene, path)
+            .and_then(|path| documents.emitter(&path))
+            .is_some_and(|def| def.emitter.lifetime.is_none()),
+    });
+    let owner = Owner { age, immortal };
     section(ui, "Space", |ui| {
         widgets::integer_on_release(
             ui,
@@ -114,10 +171,12 @@ fn show_scene(ui: &mut Ui, scene: &str, file: &mut EffectFile, documents: &Docum
     });
     section(ui, "Rendering", |ui| show_render(ui, scene, &mut file.render, documents));
     section(ui, "Gravity", |ui| show_gravity(ui, &mut file.gravity));
-    section(ui, "Mouse attractor", |ui| show_attractor(ui, &mut file.attractor));
+    section(ui, "Mouse attractor", |ui| {
+        show_attractor(ui, &mut file.attractor, owner);
+    });
     section(ui, "Modifiers", |ui| {
         ui.weak("For every particle in the scene");
-        show_modifiers(ui, &mut file.modifiers);
+        show_modifiers(ui, &mut file.modifiers, owner);
     });
 }
 
@@ -214,14 +273,17 @@ fn show_gravity(ui: &mut Ui, gravity: &mut Option<Gravity>) {
     }
 }
 
-fn show_attractor(ui: &mut Ui, attractor: &mut Option<TargetAttractor>) {
+fn show_attractor(ui: &mut Ui, attractor: &mut Option<TargetAttractor>, owner: Owner) {
     let default = TargetAttractor { strength: 2e6.into(), max_accel: 400.0.into() };
     let hint = "Pulls particles to the mouse while its button is held";
     widgets::optional(ui, "Enabled", hint, attractor, default);
     if let Some(attractor) = attractor {
-        animated_number(ui, "Strength", "Negative repels", &mut attractor.strength, &STRENGTH);
+        // It's applied like a force.
+        let context = owner.modifier_context(Phase::Force);
+        let TargetAttractor { strength, max_accel } = attractor;
+        animated_number(ui, "Strength", "Negative repels", strength, &STRENGTH, context);
         let hint = "Limit to the acceleration";
-        animated_number(ui, "Max. accel.", hint, &mut attractor.max_accel, &ACCELERATION);
+        animated_number(ui, "Max. accel.", hint, max_accel, &ACCELERATION, context);
     }
 }
 
@@ -231,25 +293,24 @@ fn show_emitter(
     scene: &str,
     entry: &mut EmitterEntry,
     documents: &Documents,
+    age: Option<f32>,
 ) -> Option<(String, EmitterDef)> {
     section(ui, "Placement", |ui| {
-        let keyed = entry.motion.position.is_some();
-        tracked_row(ui, "Position", "", keyed, |ui| {
-            widgets::vec2(ui, &mut entry.position, &DISTANCE);
+        let context = Context { time_only: true, age, life_warning: None };
+        let EmitterEntry { position, rotation, motion, .. } = entry;
+        let (look, start) = (vec2_look(&DISTANCE), *position);
+        keyed(ui, "Position", "", &look, &mut motion.position, context, start, |ui| {
+            widgets::vec2(ui, position, &DISTANCE);
         });
-        let keyed = entry.motion.rotation.is_some();
-        tracked_row(ui, "Rotation", "", keyed, |ui| {
-            widgets::slider(ui, &mut entry.rotation, &SIGNED_ANGLE);
-        });
+        tracked_number(ui, "Rotation", "", rotation, &SIGNED_ANGLE, &mut motion.rotation, context);
     });
     match &mut entry.source {
         EmitterSource::Inline(def) => {
-            show_def(ui, def);
+            show_def(ui, def, age);
             None
         }
         EmitterSource::File(file) => {
-            let path = AssetPath::parse(scene).resolve_embed_str(file).ok()?;
-            let path = document_path(&path);
+            let path = emitter_path(scene, file)?;
             let Some(mut def) = documents.emitter(&path).cloned() else {
                 ui.colored_label(theme::WARNING, format!("{path} isn't loaded."));
                 return None;
@@ -260,21 +321,25 @@ fn show_emitter(
                 let text = format!("The rest is shared with {}.", others.join(", "));
                 ui.colored_label(theme::WARNING, text);
             }
-            show_def(ui, &mut def);
+            show_def(ui, &mut def, age);
             Some((path, def))
         }
     }
 }
 
-fn show_def(ui: &mut Ui, def: &mut EmitterDef) {
-    let EmitterDef { emitter, tracks, modifiers, attractor } = def;
-    let none = Default::default();
-    let keyed = tracks.as_ref().unwrap_or(&none).clone();
+/// Where the emitter file is that a scene calls `file`.
+fn emitter_path(scene: &str, file: &str) -> Option<String> {
+    Some(document_path(&AssetPath::parse(scene).resolve_embed_str(file).ok()?))
+}
+
+fn show_def(ui: &mut Ui, def: &mut EmitterDef, age: Option<f32>) {
+    let EmitterDef { emitter, tracks: stored_tracks, modifiers, attractor } = def;
+    let owner = Owner { age, immortal: emitter.lifetime.is_none() };
+    let context = owner.context();
+    let mut tracks = stored_tracks.clone().unwrap_or_default();
     section(ui, "Spawning", |ui| {
         let rate = Number::new(0.0, 100_000.0).log().at_least(0.0).suffix("/s");
-        tracked_row(ui, "Rate", "", keyed.rate.is_some(), |ui| {
-            widgets::slider(ui, &mut emitter.rate, &rate);
-        });
+        tracked_number(ui, "Rate", "", &mut emitter.rate, &rate, &mut tracks.rate, context);
         let hint = "Spawned once, at the start. Restart the scene to see a change.";
         let burst = Number::new(0.0, 1_000_000.0).log().at_least(0.0);
         widgets::integer(ui, "Burst", hint, &mut emitter.burst_count, &burst);
@@ -283,25 +348,18 @@ fn show_def(ui: &mut Ui, def: &mut EmitterDef) {
         widgets::optional(ui, "Limited life", hint, &mut emitter.lifetime, (2.0..4.0).into());
         if let Some(lifetime) = &mut emitter.lifetime {
             let seconds = Number::new(0.0, 20.0).log().at_least(0.001).suffix(" s");
-            spread(ui, "Lifetime", "", lifetime, &seconds, keyed.lifetime.is_some());
-        } else if mortal && let Some(tracks) = tracks {
+            spread(ui, "Lifetime", "", lifetime, &seconds, &mut tracks.lifetime, context);
+        } else if mortal {
             // It would be an error now.
             tracks.lifetime = None;
         }
-        let kind = std::mem::discriminant(&emitter.spawn);
-        show_area(ui, &mut emitter.spawn, keyed.spawn.is_some());
-        if std::mem::discriminant(&emitter.spawn) != kind
-            && let Some(tracks) = tracks
-        {
-            // They're for the other kind of area.
-            tracks.spawn = None;
-        }
+        show_area(ui, &mut emitter.spawn, &mut tracks.spawn, context);
         let hint = "Whether these particles take part in the scene's gravity";
         widgets::checkbox(ui, "Gravity", hint, &mut emitter.gravity);
     });
     section(ui, "Motion", |ui| {
         let speed = Number::new(-1000.0, 1000.0).log();
-        spread(ui, "Speed", "", &mut emitter.speed, &speed, keyed.speed.is_some());
+        spread(ui, "Speed", "", &mut emitter.speed, &speed, &mut tracks.speed, context);
         widgets::row(ui, "Direction", "What the angle is measured from", |ui| {
             let options = [
                 (SpawnDirection::Fixed, "Fixed"),
@@ -310,58 +368,184 @@ fn show_def(ui: &mut Ui, def: &mut EmitterDef) {
             ];
             widgets::choice(ui, "direction", &mut emitter.direction, &options);
         });
-        spread(ui, "Angle", "", &mut emitter.angle, &TURN, keyed.angle.is_some());
+        spread(ui, "Angle", "", &mut emitter.angle, &TURN, &mut tracks.angle, context);
         let hint = "How far particles are turned; shows on textures and stretched disks";
-        spread(ui, "Rotation", hint, &mut emitter.rotation, &TURN, keyed.rotation.is_some());
+        // Not to be confused with that of the emitter.
+        let (value, track) = (&mut emitter.rotation, &mut tracks.rotation);
+        spread(ui, "Rotation", hint, value, &TURN, track, context);
         let spin = Number::angle(-720.0, 720.0).suffix("°/s");
         let hint = "How fast particles turn";
-        spread(ui, "Spin", hint, &mut emitter.spin, &spin, keyed.spin.is_some());
+        spread(ui, "Spin", hint, &mut emitter.spin, &spin, &mut tracks.spin, context);
     });
     section(ui, "Appearance", |ui| {
         let size = Number::new(0.0, 100.0).log().at_least(0.0);
-        spread(ui, "Radius", "", &mut emitter.radius, &size, keyed.radius.is_some());
+        spread(ui, "Radius", "", &mut emitter.radius, &size, &mut tracks.radius, context);
         let mass = Number::new(0.0, 1000.0).log();
-        let hint = "Mass is the radius times this";
-        tracked_row(ui, "Mass / radius", hint, keyed.mass_per_radius.is_some(), |ui| {
-            widgets::slider(ui, &mut emitter.mass_per_radius, &mass);
-        });
-        show_color(ui, emitter, [&keyed.red, &keyed.green, &keyed.blue].map(Option::is_some));
-        spread(ui, "Opacity", "", &mut emitter.alpha, &UNIT, keyed.alpha.is_some());
+        let hint = "Mass is the radius times this. Also changes existing particles.";
+        let (value, track) = (&mut emitter.mass_per_radius, &mut tracks.mass_per_radius);
+        tracked_number(ui, "Mass / radius", hint, value, &mass, track, context);
+        show_color(ui, emitter, &mut tracks, context);
+        spread(ui, "Opacity", "", &mut emitter.alpha, &UNIT, &mut tracks.alpha, context);
     });
-    section(ui, "Mouse attractor", |ui| show_attractor(ui, attractor));
+    section(ui, "Mouse attractor", |ui| show_attractor(ui, attractor, owner));
     section(ui, "Modifiers", |ui| {
         ui.weak("For this emitter's particles");
-        show_modifiers(ui, modifiers);
+        show_modifiers(ui, modifiers, owner);
     });
+    store_tracks(stored_tracks, tracks);
 }
 
-const KEYED_HINT: &str = "Keyframes replace this value while they're there";
-
-/// A row whose value keyframes may replace.
-fn tracked_row(ui: &mut Ui, label: &str, hint: &str, keyed: bool, add: impl FnOnce(&mut Ui)) {
-    widgets::row(ui, label, hint, add);
-    show_keyed(ui, keyed);
-}
-
-fn show_keyed(ui: &mut Ui, keyed: bool) {
-    if keyed {
-        widgets::row(ui, "", "", |ui| ui.weak("Keyframed").on_hover_text(KEYED_HINT));
+/// Puts changed tracks back, if there are any.
+fn store_tracks(stored: &mut Option<EmitterTracks>, tracks: EmitterTracks) {
+    let none = EmitterTracks::default();
+    if *stored.as_ref().unwrap_or(&none) != tracks {
+        *stored = (tracks != none).then_some(tracks);
     }
 }
 
+fn number_look(number: &Number) -> Look {
+    Look::Curves(&["Value"], number.clone())
+}
+
+fn vec2_look(number: &Number) -> Look {
+    Look::Curves(&["x", "y"], number.clone())
+}
+
+fn range_look(number: &Number) -> Look {
+    Look::Curves(&["from", "to"], number.clone())
+}
+
+/// A row with either a constant value or keyframes, and the editor of those. New keyframes have
+/// the value `start`.
+fn keyed<T: Value>(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    look: &Look,
+    track: &mut Option<Track<T>>,
+    context: Context,
+    start: T,
+    constant: impl FnOnce(&mut Ui),
+) {
+    let mut keys = track.as_ref().map(Keys::of);
+    let before = keys.clone();
+    let toggled = keys_row(ui, label, hint, look, &mut keys, context, constant);
+    if toggled {
+        *track = match track {
+            Some(_) => None,
+            None => Some(new_track(start, context)),
+        };
+    } else if keys != before
+        && let (Some(keys), Some(track)) = (&keys, track)
+    {
+        keys.store(track);
+    }
+}
+
+/// Keyframes that change nothing yet.
+fn new_track<T: Value>(value: T, context: Context) -> Track<T> {
+    let keys = [(0.0, value), (1.0, value)];
+    if context.time_only { Track::over_time(keys) } else { Track::over_life(keys) }
+}
+
+/// What [`keyed`] shows. Returns whether keyframes should be turned on or off.
+fn keys_row(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    look: &Look,
+    keys: &mut Option<Keys>,
+    context: Context,
+    constant: impl FnOnce(&mut Ui),
+) -> bool {
+    ui.push_id(label, |ui| {
+        let open_id = ui.id().with("open");
+        let mut open = ui.data(|data| data.get_temp(open_id)).unwrap_or(false);
+        let toggled = widgets::key_row(ui, label, hint, keys.is_some(), |ui| match keys {
+            Some(keys) => curves::preview(ui, keys, look, &mut open),
+            None => constant(ui),
+        });
+        if toggled {
+            open = keys.is_none();
+        } else if open && let Some(keys) = keys {
+            let fill = egui::Color32::from_gray(32);
+            egui::Frame::new().fill(fill).corner_radius(4).inner_margin(6).show(ui, |ui| {
+                curves::editor(ui, keys, look, context);
+            });
+        }
+        ui.data_mut(|data| data.insert_temp(open_id, open));
+        toggled
+    })
+    .inner
+}
+
+/// A number of an emitter, and its track.
+fn tracked_number(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    value: &mut f32,
+    number: &Number,
+    track: &mut Option<Track<f32>>,
+    context: Context,
+) {
+    let start = *value;
+    keyed(ui, label, hint, &number_look(number), track, context, start, |ui| {
+        widgets::slider(ui, value, number);
+    });
+}
+
+/// A random range of an emitter, and its track.
 fn spread(
     ui: &mut Ui,
     label: &str,
     hint: &str,
     value: &mut Spread,
     number: &Number,
-    keyed: bool,
+    track: &mut Option<Track<Vec2>>,
+    context: Context,
 ) {
-    widgets::spread(ui, label, hint, value, number);
-    show_keyed(ui, keyed);
+    let start = Vec2::new(value.range.start, value.range.end);
+    keyed(ui, label, hint, &range_look(number), track, context, start, |ui| {
+        widgets::spread_ends(ui, value, number);
+    });
+    ui.push_id((label, "shape"), |ui| {
+        widgets::spread_shape(ui, value, number, track.is_none());
+    });
 }
 
-fn show_area(ui: &mut Ui, area: &mut SpawnArea, keyed: bool) {
+/// The tracks of an area's first and second dimension.
+fn area_slots(tracks: &Option<AreaTracks>) -> [Option<Track<Vec2>>; 2] {
+    match tracks.clone() {
+        None => [None, None],
+        Some(AreaTracks::Rect { half_extents: track } | AreaTracks::Ellipse { radii: track }) => {
+            [Some(track), None]
+        }
+        Some(AreaTracks::Ring { radius: a, arc: b } | AreaTracks::Line { from: a, to: b }) => {
+            [a, b]
+        }
+    }
+}
+
+/// The inverse of [`area_slots`], for an area of this kind.
+fn area_tracks(area: &SpawnArea, [a, b]: [Option<Track<Vec2>>; 2]) -> Option<AreaTracks> {
+    match area {
+        SpawnArea::Point => None,
+        SpawnArea::Rect { .. } => a.map(|half_extents| AreaTracks::Rect { half_extents }),
+        SpawnArea::Ellipse { .. } => a.map(|radii| AreaTracks::Ellipse { radii }),
+        _ if a.is_none() && b.is_none() => None,
+        SpawnArea::Ring { .. } => Some(AreaTracks::Ring { radius: a, arc: b }),
+        SpawnArea::Line { .. } => Some(AreaTracks::Line { from: a, to: b }),
+    }
+}
+
+fn show_area(
+    ui: &mut Ui,
+    area: &mut SpawnArea,
+    tracks: &mut Option<AreaTracks>,
+    context: Context,
+) {
+    let kind = std::mem::discriminant(area);
     widgets::row(ui, "Area", "Where particles spawn", |ui| {
         let options = [
             ("Point", SpawnArea::Point),
@@ -378,6 +562,14 @@ fn show_area(ui: &mut Ui, area: &mut SpawnArea, keyed: bool) {
         ];
         widgets::variant(ui, "area", area, &options);
     });
+    if std::mem::discriminant(area) != kind {
+        // They're for the other kind of area.
+        *tracks = None;
+    }
+
+    let mut slots = area_slots(tracks);
+    let before = slots.clone();
+    let [a, b] = &mut slots;
     let fill_row = |ui: &mut Ui, fill: &mut Fill| {
         widgets::row(ui, "Fill", "", |ui| {
             widgets::choice(ui, "fill", fill, &[(Fill::Area, "Area"), (Fill::Edge, "Edge")]);
@@ -387,61 +579,123 @@ fn show_area(ui: &mut Ui, area: &mut SpawnArea, keyed: bool) {
         SpawnArea::Point => {}
         SpawnArea::Rect { half_extents, fill } => {
             let hint = "Half the width and height";
-            widgets::row(ui, "Half size", hint, |ui| widgets::vec2(ui, half_extents, &SIZE));
+            tracked_vec2(ui, "Half size", hint, half_extents, &SIZE, a, context);
             fill_row(ui, fill);
         }
         SpawnArea::Ellipse { radii, fill } => {
-            widgets::row(ui, "Radii", "", |ui| widgets::vec2(ui, radii, &SIZE));
+            tracked_vec2(ui, "Radii", "", radii, &SIZE, a, context);
             fill_row(ui, fill);
         }
         SpawnArea::Ring { radius, arc } => {
             // "Radius" is taken by the particles' own.
-            widgets::spread(ui, "Ring radius", "", radius, &SIZE);
-            widgets::spread(ui, "Arc", "Which part of the ring", arc, &TURN);
+            spread(ui, "Ring radius", "", radius, &SIZE, a, context);
+            spread(ui, "Arc", "Which part of the ring", arc, &TURN, b, context);
         }
         SpawnArea::Line { from, to } => {
-            widgets::row(ui, "From", "", |ui| widgets::vec2(ui, from, &DISTANCE));
-            widgets::row(ui, "To", "", |ui| widgets::vec2(ui, to, &DISTANCE));
+            tracked_vec2(ui, "From", "", from, &DISTANCE, a, context);
+            tracked_vec2(ui, "To", "", to, &DISTANCE, b, context);
         }
     }
-    show_keyed(ui, keyed);
+    if slots != before {
+        *tracks = area_tracks(area, slots);
+    }
 }
 
-fn show_color(ui: &mut Ui, emitter: &mut ParticleEmitter, keyed: [bool; 3]) {
+fn tracked_vec2(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    value: &mut Vec2,
+    number: &Number,
+    track: &mut Option<Track<Vec2>>,
+    context: Context,
+) {
+    let start = *value;
+    keyed(ui, label, hint, &vec2_look(number), track, context, start, |ui| {
+        widgets::vec2(ui, value, number);
+    });
+}
+
+fn show_color(
+    ui: &mut Ui,
+    emitter: &mut ParticleEmitter,
+    tracks: &mut EmitterTracks,
+    context: Context,
+) {
     let ParticleEmitter { red, green, blue, .. } = emitter;
-    let hint = "Each particle's red, green and blue are between those of these two";
-    widgets::row(ui, "Color from", hint, |ui| {
-        widgets::srgb(ui, [&mut red.range.start, &mut green.range.start, &mut blue.range.start]);
-    });
-    widgets::row(ui, "Color to", hint, |ui| {
-        widgets::srgb(ui, [&mut red.range.end, &mut green.range.end, &mut blue.range.end]);
-    });
-    show_keyed(ui, keyed.contains(&true));
-    egui::CollapsingHeader::new("Color channels").show(ui, |ui| {
+    let EmitterTracks { red: red_track, green: green_track, blue: blue_track, .. } = tracks;
+    let hint = "Each particle's red, green and blue are between those of two colors";
+    let mut keys = match (&red_track, &green_track, &blue_track) {
+        (Some(red), Some(green), Some(blue)) => Keys::of_channels([red, green, blue]),
+        _ => None,
+    };
+    let separate = keys.is_none()
+        && (red_track.is_some() || green_track.is_some() || blue_track.is_some());
+
+    if separate {
+        widgets::row(ui, "Color", hint, |ui| {
+            ui.weak("Its channels have keyframes of their own");
+        });
+    } else {
+        let before = keys.clone();
+        let label = if keys.is_some() { "Color" } else { "Color from" };
+        let toggled = keys_row(ui, label, hint, &Look::Colors, &mut keys, context, |ui| {
+            let channels = [&mut red.range.start, &mut green.range.start, &mut blue.range.start];
+            widgets::srgb(ui, channels);
+        });
+        if toggled {
+            let turn_on = keys.is_none();
+            for (track, spread) in
+                [(&mut *red_track, &*red), (&mut *green_track, &*green), (&mut *blue_track, &*blue)]
+            {
+                let start = Vec2::new(spread.range.start, spread.range.end);
+                *track = turn_on.then(|| new_track(start, context));
+            }
+        } else if keys != before
+            && let (Some(keys), Some(red), Some(green), Some(blue)) =
+                (&keys, &mut *red_track, &mut *green_track, &mut *blue_track)
+        {
+            keys.store_channels([red, green, blue]);
+        }
+        if keys.is_none() {
+            widgets::row(ui, "Color to", hint, |ui| {
+                let channels = [&mut red.range.end, &mut green.range.end, &mut blue.range.end];
+                widgets::srgb(ui, channels);
+            });
+        }
+    }
+    egui::CollapsingHeader::new("Color channels").default_open(separate).show(ui, |ui| {
         let channel = Number::new(0.0, 2.0).at_least(0.0);
-        widgets::spread(ui, "Red", "", red, &channel);
-        widgets::spread(ui, "Green", "", green, &channel);
-        widgets::spread(ui, "Blue", "", blue, &channel);
+        spread(ui, "Red", "", red, &channel, red_track, context);
+        spread(ui, "Green", "", green, &channel, green_track, context);
+        spread(ui, "Blue", "", blue, &channel, blue_track, context);
     });
 }
 
-/// What a modifier parameter that has keyframes shows, until they can be edited.
-fn show_track<T: Keyable>(ui: &mut Ui, track: &Track<T>) {
-    let clock = format!("{:?}", track.clock).to_lowercase();
-    ui.weak(format!("{} keyframes over {clock}", track.keys().len()));
-}
-
-fn animated<T: Keyable>(
+/// A modifier parameter: a constant or keyframes.
+fn animated<T: Value>(
     ui: &mut Ui,
     label: &str,
     hint: &str,
     value: &mut Animated<T>,
+    look: &Look,
+    context: Context,
     add: impl FnOnce(&mut Ui, &mut T),
 ) {
-    widgets::row(ui, label, hint, |ui| match value {
-        Animated::Constant(value) => add(ui, value),
-        Animated::Track(track) => show_track(ui, track),
-    });
+    let (mut constant, mut track) = match value {
+        Animated::Constant(constant) => (*constant, None),
+        Animated::Track(track) => {
+            // What's left when its keyframes are removed.
+            let first = track.keys().first().map(|key| key.value);
+            (first.unwrap_or(T::store(Default::default())), Some(track.clone()))
+        }
+    };
+    let start = constant;
+    keyed(ui, label, hint, look, &mut track, context, start, |ui| add(ui, &mut constant));
+    *value = match track {
+        Some(track) => Animated::Track(track),
+        None => Animated::Constant(constant),
+    };
 }
 
 fn animated_number(
@@ -450,14 +704,24 @@ fn animated_number(
     hint: &str,
     value: &mut Animated<f32>,
     number: &Number,
+    context: Context,
 ) {
-    animated(ui, label, hint, value, |ui, value| {
+    animated(ui, label, hint, value, &number_look(number), context, |ui, value| {
         widgets::slider(ui, value, number);
     });
 }
 
-fn animated_vec2(ui: &mut Ui, label: &str, hint: &str, value: &mut Animated<Vec2>, number: &Number) {
-    animated(ui, label, hint, value, |ui, value| widgets::vec2(ui, value, number));
+fn animated_vec2(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    value: &mut Animated<Vec2>,
+    number: &Number,
+    context: Context,
+) {
+    animated(ui, label, hint, value, &vec2_look(number), context, |ui, value| {
+        widgets::vec2(ui, value, number);
+    });
 }
 
 fn modifier_name(modifier: &Modifier) -> &'static str {
@@ -512,7 +776,7 @@ enum ListChange {
     Swap(usize, usize),
 }
 
-fn show_modifiers(ui: &mut Ui, modifiers: &mut Modifiers) {
+fn show_modifiers(ui: &mut Ui, modifiers: &mut Modifiers, owner: Owner) {
     let mut change = None;
     for phase in PHASES {
         // Only the order within a phase matters.
@@ -542,7 +806,7 @@ fn show_modifiers(ui: &mut Ui, modifiers: &mut Modifiers) {
                             }
                         });
                     });
-                    show_modifier(ui, &mut modifiers[index]);
+                    show_modifier(ui, &mut modifiers[index], owner.modifier_context(phase));
                 });
             });
         }
@@ -567,42 +831,45 @@ fn show_modifiers(ui: &mut Ui, modifiers: &mut Modifiers) {
     });
 }
 
-fn show_modifier(ui: &mut Ui, modifier: &mut Modifier) {
+fn show_modifier(ui: &mut Ui, modifier: &mut Modifier, context: Context) {
     match modifier {
         Modifier::Acceleration(acceleration) => {
             let number = Number::new(-2000.0, 2000.0).log();
-            animated_vec2(ui, "Acceleration", "", acceleration, &number);
+            animated_vec2(ui, "Acceleration", "", acceleration, &number, context);
         }
         Modifier::PointAttractor { offset, strength, max_accel }
         | Modifier::Vortex { offset, strength, max_accel } => {
             let hint = "Relative to the scene or emitter";
-            animated_vec2(ui, "Offset", hint, offset, &DISTANCE);
+            animated_vec2(ui, "Offset", hint, offset, &DISTANCE, context);
             let hint = "Negative goes the other way";
-            animated_number(ui, "Strength", hint, strength, &STRENGTH);
+            animated_number(ui, "Strength", hint, strength, &STRENGTH, context);
             let hint = "Limit to the acceleration";
-            animated_number(ui, "Max. accel.", hint, max_accel, &ACCELERATION);
+            animated_number(ui, "Max. accel.", hint, max_accel, &ACCELERATION, context);
         }
         Modifier::Drag(drag) => {
             let hint = "Fraction of the speed lost per second, roughly";
-            animated_number(ui, "Drag", hint, drag, &Number::new(0.0, 10.0).log());
+            let number = Number::new(0.0, 10.0).log();
+            animated_number(ui, "Drag", hint, drag, &number, context);
         }
         Modifier::Bounds { half_extents, restitution } => {
-            animated_vec2(ui, "Half size", "Half the width and height", half_extents, &SIZE);
+            let hint = "Half the width and height";
+            animated_vec2(ui, "Half size", hint, half_extents, &SIZE, context);
             let hint = "Fraction of the speed kept when bouncing";
             let number = Number::new(0.0, 1.0).at_least(0.0);
-            animated_number(ui, "Bounciness", hint, restitution, &number);
+            animated_number(ui, "Bounciness", hint, restitution, &number, context);
         }
         Modifier::Color(blend, color) => {
             show_blend(ui, blend);
-            animated(ui, "Color", "", color, widgets::rgb);
+            animated(ui, "Color", "", color, &Look::Color, context, widgets::rgb);
         }
         Modifier::Alpha(blend, value) => {
             show_blend(ui, blend);
-            animated_number(ui, "Opacity", "", value, &Number::new(0.0, 1.0).at_least(0.0));
+            let number = Number::new(0.0, 1.0).at_least(0.0);
+            animated_number(ui, "Opacity", "", value, &number, context);
         }
         Modifier::Size(blend, value) | Modifier::Mass(blend, value) => {
             show_blend(ui, blend);
-            animated_number(ui, "Value", "", value, &FACTOR);
+            animated_number(ui, "Value", "", value, &FACTOR, context);
         }
     }
 }
@@ -647,7 +914,7 @@ mod tests {
                         ..Default::default()
                     };
                     let mut output = ctx.run_ui(input, |ui| {
-                        show(ui, &scene, &mut selection, &mut documents);
+                        show(ui, &scene, &mut selection, &mut documents, &Ages::default());
                     });
                     output.textures_delta.clear();
                 }
@@ -655,6 +922,39 @@ mod tests {
             assert!(!documents.can_undo(&scene), "{scene}");
         }
         assert!(documents.dirty_files(None).is_empty());
+    }
+
+    #[test]
+    fn tracks_are_only_stored_if_there_are_any() {
+        let mut stored = None;
+        store_tracks(&mut stored, EmitterTracks::default());
+        assert!(stored.is_none());
+        let tracks =
+            EmitterTracks { rate: Some(Track::over_time([(0.0, 1.0)])), ..Default::default() };
+        store_tracks(&mut stored, tracks.clone());
+        assert_eq!(stored, Some(tracks));
+        store_tracks(&mut stored, EmitterTracks::default());
+        assert!(stored.is_none());
+    }
+
+    #[test]
+    fn area_tracks_fit_their_area() {
+        let track = || Some(Track::over_time([(0.0, Vec2::ONE)]));
+        let areas = [
+            SpawnArea::Rect { half_extents: Vec2::ONE, fill: Fill::Area },
+            SpawnArea::Ellipse { radii: Vec2::ONE, fill: Fill::Area },
+            SpawnArea::Ring { radius: (0.0..1.0).into(), arc: (0.0..1.0).into() },
+            SpawnArea::Line { from: Vec2::ZERO, to: Vec2::ONE },
+        ];
+        for spawn in areas {
+            let slots = [track(), None];
+            let tracks = area_tracks(&spawn, slots.clone());
+            assert_eq!(area_slots(&tracks), slots);
+            let emitter = ParticleEmitter { spawn: spawn.clone(), ..Default::default() };
+            let tracks = EmitterTracks { spawn: tracks, ..Default::default() };
+            assert!(tracks.check(&emitter).is_ok());
+            assert!(area_tracks(&spawn, [None, None]).is_none());
+        }
     }
 
     #[test]

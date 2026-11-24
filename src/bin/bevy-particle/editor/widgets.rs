@@ -11,9 +11,12 @@ use bevy_egui::egui::{
 };
 use bevy_particle::{Rgb, Shape, Spread};
 
+use super::curves;
+
 const LABEL_WIDTH: f32 = 92.0;
 const NUMBER_WIDTH: f32 = 64.0;
 const ROW_HEIGHT: f32 = 22.0;
+const KEY_WIDTH: f32 = 18.0;
 
 /// How a number is shown and what it can be.
 #[derive(Clone)]
@@ -75,6 +78,19 @@ impl Number {
         self
     }
 
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    pub fn suffix_text(&self) -> &'static str {
+        self.suffix
+    }
+
+    /// How much the slider covers, in shown units.
+    pub fn span(&self) -> f32 {
+        self.soft.end() - self.soft.start()
+    }
+
     /// Where a shown value is on the slider, from 0 to 1.
     fn position(&self, shown: f32) -> f32 {
         let (min, max) = (self.bend(*self.soft.start()), self.bend(*self.soft.end()));
@@ -101,7 +117,7 @@ impl Number {
     }
 
     /// Sets a value from a shown one, unless that isn't a number.
-    fn store(&self, value: &mut f32, shown: f32) {
+    pub fn store(&self, value: &mut f32, shown: f32) {
         if shown.is_finite() {
             *value = (shown / self.scale).clamp(*self.hard.start(), *self.hard.end());
         }
@@ -112,12 +128,17 @@ impl Number {
     fn tidy(&self, shown: f32, position: f32, width: f32) -> f32 {
         let pixel = 1.0 / width.max(1.0);
         let step = (self.at(position + pixel) - self.at(position - pixel)).abs() / 2.0;
-        if step <= 0.0 {
-            return shown;
-        }
-        let unit = 10f64.powf(f64::from(step).log10().floor());
-        ((f64::from(shown) / unit).round() * unit) as f32
+        round_to_step(shown, step)
     }
+}
+
+/// Rounds to a decimal place that's at least as fine as `step`.
+pub fn round_to_step(value: f32, step: f32) -> f32 {
+    if step.is_nan() || step <= 0.0 {
+        return value;
+    }
+    let unit = 10f64.powf(f64::from(step).log10().floor());
+    ((f64::from(value) / unit).round() * unit) as f32
 }
 
 /// A labeled row.
@@ -137,10 +158,29 @@ pub fn row<R>(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui) ->
     .inner
 }
 
+/// A labeled row with a keyframe button. Returns whether that was clicked.
+pub fn key_row(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    keyed: bool,
+    add: impl FnOnce(&mut Ui),
+) -> bool {
+    row(ui, label, hint, |ui| {
+        let width = ui.available_width() - KEY_WIDTH - ui.spacing().item_spacing.x;
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(egui::vec2(width, ROW_HEIGHT), layout, |ui| {
+            ui.set_min_width(width);
+            add(ui);
+        });
+        curves::key_button(ui, keyed)
+    })
+}
+
 /// A number to drag or type.
 pub fn drag(ui: &mut Ui, value: &mut f32, number: &Number) -> Response {
     let mut shown = *value * number.scale;
-    let span = number.soft.end() - number.soft.start();
+    let span = number.span();
     let speed = if number.log { shown.abs().max(number.knee()) * 0.01 } else { span * 0.002 };
     let widget = egui::DragValue::new(&mut shown)
         .speed(speed)
@@ -318,26 +358,24 @@ pub fn optional<T: Clone + Send + Sync + 'static>(
     });
 }
 
-/// A random range: its ends, a two-handled slider, and how values are distributed.
-pub fn spread(ui: &mut Ui, label: &str, hint: &str, value: &mut Spread, number: &Number) {
-    ui.push_id(label, |ui| {
-        row(ui, label, hint, |ui| {
-            drag(ui, &mut value.range.start, number);
-            ui.weak("to");
-            drag(ui, &mut value.range.end, number);
-        });
-        indented(ui, |ui| {
+/// The ends of a random range.
+pub fn spread_ends(ui: &mut Ui, value: &mut Spread, number: &Number) {
+    drag(ui, &mut value.range.start, number);
+    ui.weak("to");
+    drag(ui, &mut value.range.end, number);
+}
+
+/// A two-handled slider for a random range, if it has constant ends, and how its values are
+/// distributed.
+pub fn spread_shape(ui: &mut Ui, value: &mut Spread, number: &Number, constant: bool) {
+    row(ui, "", "", |ui| {
+        if constant {
             let range = &mut value.range;
             let width = (ui.available_width() - 92.0).max(40.0);
             rail(ui, width, number, &mut [&mut range.start, &mut range.end]);
-            shape(ui, &mut value.shape);
-        });
+        }
+        shape(ui, &mut value.shape);
     });
-}
-
-/// A row without a label.
-fn indented<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    row(ui, "", "", add)
 }
 
 /// The dropdown of a distribution, with its strength in a popup of its own.
@@ -427,7 +465,7 @@ fn distribution(ui: &mut Ui, shape: &Shape) {
 }
 
 /// Splits a color into one a picker can show, and how much brighter than that it is.
-fn split_intensity(color: [f32; 3]) -> ([f32; 3], f32) {
+pub fn split_intensity(color: [f32; 3]) -> ([f32; 3], f32) {
     let intensity = color.into_iter().fold(1.0, f32::max);
     (color.map(|c| (c / intensity).max(0.0)), intensity)
 }
@@ -535,10 +573,12 @@ mod tests {
         let mut count = 16_777_217; // Not an `f32`.
         let mut position = Vec2::new(1e9, -0.000_012_3);
         show(|ui| {
-            spread(ui, "spread", "", &mut spread_value, &Number::new(0.0, 1.0).at_least(0.5));
+            let number = Number::new(0.0, 1.0).at_least(0.5);
+            spread_ends(ui, &mut spread_value, &number);
+            spread_shape(ui, &mut spread_value, &number, true);
             rgb(ui, &mut color);
             srgb(ui, channels.each_mut());
-            number(ui, "angle", "", &mut angle, &Number::angle(0.0, 10.0));
+            super::number(ui, "angle", "", &mut angle, &Number::angle(0.0, 10.0));
             integer(ui, "count", "", &mut count, &Number::new(0.0, 10.0));
             integer_on_release(ui, "count2", "", &mut count, &Number::new(1.0, 10.0));
             vec2(ui, &mut position, &Number::new(-1.0, 1.0));
