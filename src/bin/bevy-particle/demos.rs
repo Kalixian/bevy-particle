@@ -13,7 +13,10 @@ use bevy::{
 use bevy_particle::{ParticleEffect, ParticleEmitter, ParticleSpace};
 use serde::{Deserialize, Serialize};
 
-use crate::input::{CaptureSystems, InputCapture};
+use crate::{
+    camera::{reset_view, ResetView},
+    input::{CaptureSystems, InputCapture},
+};
 
 pub const LIST_PATH: &str = "demos.ron";
 const SCENE_KEYS: [KeyCode; 9] = [
@@ -36,7 +39,16 @@ impl Plugin for DemosPlugin {
             .init_asset_loader::<DemoListLoader>()
             .init_resource::<Demos>()
             .add_systems(Startup, load_list)
-            .add_systems(Update, (read_list, pick_scene.after(CaptureSystems), respawn_scene).chain());
+            .add_systems(
+                Update,
+                (
+                    read_list,
+                    pick_scene.after(CaptureSystems),
+                    // Before the view is reset, so that both happen in the same frame.
+                    respawn_scene.before(reset_view),
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -225,6 +237,7 @@ fn respawn_scene(
     spaces: Query<(Entity, Option<&Children>), With<ParticleSpace>>,
     emitters: Query<(), With<ParticleEmitter>>,
     mut window: Single<&mut Window, With<PrimaryWindow>>,
+    mut resets: MessageWriter<ResetView>,
 ) {
     let Some((name, handle)) = demos.scenes.get(demos.current).cloned() else {
         return;
@@ -250,6 +263,8 @@ fn respawn_scene(
             return;
         }
     }
+    // Changes to the scene on screen leave the view alone, even if they restart the scene.
+    let picked = demos.respawn;
     demos.respawn |= changed;
     if !demos.respawn {
         return;
@@ -264,6 +279,9 @@ fn respawn_scene(
     for (space, _) in &spaces {
         // Despawning a space despawns its child emitters too.
         commands.entity(space).despawn();
+    }
+    if picked {
+        resets.write(ResetView);
     }
     let space = effect.spawn(&mut commands);
     commands.entity(space).insert(Name::new(name.clone()));

@@ -12,7 +12,7 @@ use bevy_particle::{
 };
 
 use super::{
-    curves::{self, Context, Keys, Look, Value},
+    curves::{self, Context, KeyAction, Keys, Look, Value},
     documents::{document_path, texture_path, Documents},
     manage::{self, Dialog},
     theme,
@@ -334,7 +334,7 @@ fn show_emitter(
 }
 
 /// Where the emitter file is that a scene calls `file`.
-fn emitter_path(scene: &str, file: &str) -> Option<String> {
+pub fn emitter_path(scene: &str, file: &str) -> Option<String> {
     Some(document_path(&AssetPath::parse(scene).resolve_embed_str(file).ok()?))
 }
 
@@ -435,16 +435,22 @@ fn keyed<T: Value>(
 ) {
     let mut keys = track.as_ref().map(Keys::of);
     let before = keys.clone();
-    let toggled = keys_row(ui, label, hint, look, &mut keys, context, constant);
-    if toggled {
-        *track = match track {
-            Some(_) => None,
-            None => Some(new_track(start, context)),
-        };
-    } else if keys != before
-        && let (Some(keys), Some(track)) = (&keys, track)
-    {
-        keys.store(track);
+    match keys_row(ui, label, hint, look, &mut keys, context, constant) {
+        Some(KeyAction::Toggle) => {
+            *track = match track {
+                Some(_) => None,
+                None => Some(new_track(start, context)),
+            };
+        }
+        Some(KeyAction::Paste(keys)) => {
+            keys.store(track.get_or_insert_with(|| new_track(start, context)));
+        }
+        None if keys != before => {
+            if let (Some(keys), Some(track)) = (&keys, track) {
+                keys.store(track);
+            }
+        }
+        None => {}
     }
 }
 
@@ -454,7 +460,7 @@ fn new_track<T: Value>(value: T, context: Context) -> Track<T> {
     if context.time_only { Track::over_time(keys) } else { Track::over_life(keys) }
 }
 
-/// What [`keyed`] shows. Returns whether keyframes should be turned on or off.
+/// What [`keyed`] shows. Returns what else than editing them should be done to the keyframes.
 fn keys_row(
     ui: &mut Ui,
     label: &str,
@@ -463,16 +469,18 @@ fn keys_row(
     keys: &mut Option<Keys>,
     context: Context,
     constant: impl FnOnce(&mut Ui),
-) -> bool {
+) -> Option<KeyAction> {
     ui.push_id(label, |ui| {
         let open_id = ui.id().with("open");
         let mut open = ui.data(|data| data.get_temp(open_id)).unwrap_or(false);
-        let toggled = widgets::key_row(ui, label, hint, keys.is_some(), |ui| match keys {
+        let add = |ui: &mut Ui| match &*keys {
             Some(keys) => curves::preview(ui, keys, look, &mut open),
             None => constant(ui),
-        });
-        if toggled {
-            open = keys.is_none();
+        };
+        let button = |ui: &mut Ui| curves::key_button(ui, keys.as_ref(), look, context);
+        let action = widgets::key_row(ui, label, hint, add, button);
+        if action.is_some() {
+            open = keys.is_none() || matches!(action, Some(KeyAction::Paste(_)));
         } else if open && let Some(keys) = keys {
             let fill = egui::Color32::from_gray(32);
             egui::Frame::new().fill(fill).corner_radius(4).inner_margin(6).show(ui, |ui| {
@@ -480,7 +488,7 @@ fn keys_row(
             });
         }
         ui.data_mut(|data| data.insert_temp(open_id, open));
-        toggled
+        action
     })
     .inner
 }
@@ -645,21 +653,26 @@ fn show_color(
     } else {
         let before = keys.clone();
         let label = if keys.is_some() { "Color" } else { "Color from" };
-        let toggled = keys_row(ui, label, hint, &Look::Colors, &mut keys, context, |ui| {
+        let action = keys_row(ui, label, hint, &Look::Colors, &mut keys, context, |ui| {
             let channels = [&mut red.range.start, &mut green.range.start, &mut blue.range.start];
             widgets::srgb(ui, channels);
         });
-        if toggled {
-            let turn_on = keys.is_none();
+        if let Some(action) = &action {
+            let turn_on = keys.is_none() || matches!(action, KeyAction::Paste(_));
             for (track, spread) in
                 [(&mut *red_track, &*red), (&mut *green_track, &*green), (&mut *blue_track, &*blue)]
             {
                 let start = Vec2::new(spread.range.start, spread.range.end);
                 *track = turn_on.then(|| new_track(start, context));
             }
-        } else if keys != before
-            && let (Some(keys), Some(red), Some(green), Some(blue)) =
-                (&keys, &mut *red_track, &mut *green_track, &mut *blue_track)
+        }
+        let changed = match &action {
+            Some(KeyAction::Paste(keys)) => Some(keys),
+            Some(KeyAction::Toggle) => None,
+            None => keys.as_ref().filter(|_| keys != before),
+        };
+        if let (Some(keys), Some(red), Some(green), Some(blue)) =
+                (changed, &mut *red_track, &mut *green_track, &mut *blue_track)
         {
             keys.store_channels([red, green, blue]);
         }

@@ -19,6 +19,13 @@
   <div id="stage"><canvas id="bevy" tabindex="0"></canvas></div>
   <div id="message" role="status">Loading…</div>
   <script type="module">
+    // The app has uses of its own for the right and middle mouse buttons.
+    const canvas = document.getElementById("bevy");
+    canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+    canvas.addEventListener("mousedown", (event) => {
+      if (event.button === 1) event.preventDefault(); // Scrolling by moving the mouse.
+    });
+
     const message = document.getElementById("message");
     const fail = (text) => { message.textContent = text; message.hidden = false; };
 

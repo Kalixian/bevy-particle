@@ -6,6 +6,7 @@ use bevy_particle::{EffectFile, EmitterSource};
 
 use super::{
     documents::{self, document_path, Documents},
+    handles,
     inspector::Selection,
     platform, theme,
 };
@@ -118,6 +119,8 @@ pub fn scene_menu(
         if ui.add(button).clicked() {
             changed = Some(DemoList { start: name.into(), ..list.clone() });
         }
+        ui.separator();
+        handles::toggle_button(ui);
         ui.separator();
         if ui.add_enabled(list.scenes.len() > 1, egui::Button::new("Remove…")).clicked() {
             *dialog = Some(Dialog::new(Action::RemoveScene, String::new()));

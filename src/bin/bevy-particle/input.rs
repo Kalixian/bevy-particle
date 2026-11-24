@@ -5,6 +5,8 @@ use bevy::prelude::*;
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct InputCapture {
     pub pointer: bool,
+    /// Unlike `pointer`, not by things in the scene that can be clicked but not scrolled.
+    pub scroll: bool,
     pub keyboard: bool,
 }
 

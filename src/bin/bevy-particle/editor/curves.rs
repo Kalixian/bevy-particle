@@ -175,6 +175,21 @@ impl Keys {
         self.set_time(place, time)
     }
 
+    /// As they can be used for another value.
+    fn adapted(mut self, look: &Look, context: Context) -> Self {
+        if context.time_only {
+            self.clock = Clock::Time;
+        }
+        if let Look::Curves(names, number) = look {
+            for key in &mut self.keys {
+                for value in &mut key.values[..names.len()] {
+                    *value = number.limit(*value);
+                }
+            }
+        }
+        self
+    }
+
     /// Tracks need at least one key to do anything.
     fn can_remove(&self) -> bool {
         self.keys.len() > 1
@@ -400,7 +415,7 @@ pub fn editor(ui: &mut Ui, keys: &mut Keys, look: &Look, context: Context) {
         remove_selected(keys, &mut state);
     }
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if !context.time_only {
             let options = [
                 (Clock::Life, "Over life"),
@@ -421,6 +436,7 @@ pub fn editor(ui: &mut Ui, keys: &mut Keys, look: &Look, context: Context) {
                 [(Repeat::Once, "Once"), (Repeat::Loop, "Loop"), (Repeat::PingPong, "Ping-pong")];
             widgets::choice(ui, "repeat", &mut keys.repeat, &options);
         }
+        copy_paste_buttons(ui, keys, look, context);
     });
     if keys.clock == Clock::Life
         && let Some(warning) = context.life_warning
@@ -704,8 +720,57 @@ fn show_selected(ui: &mut Ui, keys: &mut Keys, look: &Look, state: &mut State) {
     }
 }
 
-/// A diamond that turns keyframes on (filled) and off. Returns whether it was clicked.
-pub fn key_button(ui: &mut Ui, keyed: bool) -> bool {
+/// Keyframes that were copied, and how many curves and gradients they're for.
+#[derive(Clone)]
+struct Clipboard {
+    keys: Keys,
+    kind: (usize, usize),
+}
+
+fn clipboard_id() -> egui::Id {
+    egui::Id::new("copied keyframes")
+}
+
+fn copy(ui: &Ui, keys: &Keys, look: &Look) {
+    let kind = (look.curve_count(), look.strip_count());
+    let clipboard = Clipboard { keys: keys.clone(), kind };
+    ui.data_mut(|data| data.insert_temp(clipboard_id(), clipboard));
+}
+
+/// What pasting would make of the copied keyframes, if they're of the same kind.
+fn copied(ui: &Ui, look: &Look, context: Context) -> Option<Keys> {
+    let clipboard: Clipboard = ui.data(|data| data.get_temp(clipboard_id()))?;
+    let same = clipboard.kind == (look.curve_count(), look.strip_count());
+    same.then(|| clipboard.keys.adapted(look, context))
+}
+
+fn copy_paste_buttons(ui: &mut Ui, keys: &mut Keys, look: &Look, context: Context) {
+    if ui.small_button("Copy").on_hover_text("Copies all of these keyframes").clicked() {
+        copy(ui, keys, look);
+    }
+    let pasted = copied(ui, look, context);
+    let button = ui.add_enabled(pasted.is_some(), egui::Button::new("Paste").small());
+    if button.on_hover_text("Replaces these keyframes").clicked()
+        && let Some(pasted) = pasted
+    {
+        *keys = pasted;
+    }
+}
+
+/// What to do with a value's keyframes.
+pub enum KeyAction {
+    Toggle,
+    Paste(Keys),
+}
+
+/// A diamond that turns keyframes on (filled) and off. Its context menu copies and pastes them.
+pub fn key_button(
+    ui: &mut Ui,
+    keys: Option<&Keys>,
+    look: &Look,
+    context: Context,
+) -> Option<KeyAction> {
+    let keyed = keys.is_some();
     let size = egui::vec2(18.0, 22.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let label = if keyed { "Remove the keyframes" } else { "Animate with keyframes" };
@@ -719,7 +784,24 @@ pub fn key_button(ui: &mut Ui, keyed: bool) -> bool {
         (Color32::TRANSPARENT, color)
     };
     diamond(ui.painter(), rect.center(), 5.5, fill, outline);
-    response.on_hover_text(label).clicked()
+    let mut action = None;
+    response.context_menu(|ui| {
+        let button = egui::Button::new("Copy keyframes");
+        if ui.add_enabled(keyed, button).clicked()
+            && let Some(keys) = keys
+        {
+            copy(ui, keys, look);
+        }
+        let pasted = copied(ui, look, context);
+        let button = egui::Button::new("Paste keyframes");
+        if ui.add_enabled(pasted.is_some(), button).clicked() {
+            action = pasted.map(KeyAction::Paste);
+        }
+    });
+    if response.on_hover_text(label).clicked() {
+        action = Some(KeyAction::Toggle);
+    }
+    action
 }
 
 #[cfg(test)]
@@ -822,6 +904,21 @@ mod tests {
         assert_eq!(keys.keys[3].values[0], 4.0);
         let mut empty = Keys { keys: Vec::new(), ..keys };
         assert_eq!(empty.insert(0.5), 0);
+    }
+
+    #[test]
+    fn pasted_keys_fit_the_value() {
+        let points = [(0.0, -5.0, Ease::Smooth), (1.0, 2.0, Ease::Step)];
+        let copied = keys(Clock::Life, &points);
+        let look = Look::Curves(&["Value"], Number::new(0.0, 1.0).at_least(0.0).at_most(1.0));
+        let context = Context { time_only: true, ..Default::default() };
+        let pasted = copied.clone().adapted(&look, context);
+        assert_eq!(pasted.clock, Clock::Time);
+        let values: Vec<_> = pasted.keys.iter().map(|key| (key.values[0], key.ease)).collect();
+        assert_eq!(values, [(0.0, Ease::Smooth), (1.0, Ease::Step)]);
+
+        let look = Look::Curves(&["Value"], Number::new(-9.0, 9.0));
+        assert_eq!(copied.clone().adapted(&look, Context::default()), copied);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 mod curves;
 mod documents;
 mod files;
+mod handles;
 mod inspector;
 mod manage;
 mod panel;
@@ -18,7 +19,8 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_egui::{
-    egui, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext,
+    egui, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPostUpdateSet,
+    EguiPrimaryContextPass, PrimaryEguiContext,
 };
 
 use crate::{
@@ -39,6 +41,11 @@ impl Plugin for EditorPlugin {
         app.world_mut()
             .resource_mut::<EguiGlobalSettings>()
             .auto_create_primary_context = false;
+        // Handles are placed with the camera as it'll be drawn.
+        app.configure_sets(
+            PostUpdate,
+            EguiPostUpdateSet::EndPass.after(bevy::camera::CameraUpdateSystems),
+        );
         app.init_resource::<Editor>()
             .add_systems(Startup, spawn_ui_camera)
             .add_systems(
@@ -94,16 +101,18 @@ fn capture_input(
     let ctx = contexts.ctx_mut()?;
     // Not `is_pointer_over_egui`: without a root `Ui`, it counts the whole background layer,
     // which the panel is on, as UI.
-    let over_ui = window.cursor_position().is_some_and(|cursor| {
-        let cursor = egui::pos2(cursor.x, cursor.y);
-        editor.panel.is_some_and(|panel| panel.contains(cursor))
-            || ctx
-                .layer_id_at(cursor)
-                .is_some_and(|layer| layer.order != egui::Order::Background)
-    });
+    let cursor = window.cursor_position().map(|cursor| egui::pos2(cursor.x, cursor.y));
+    let over_panel =
+        cursor.is_some_and(|cursor| editor.panel.is_some_and(|panel| panel.contains(cursor)));
+    let layer = cursor.and_then(|cursor| ctx.layer_id_at(cursor)).map(|layer| layer.order);
+    let over_ui = over_panel || layer.is_some_and(|order| order != egui::Order::Background);
+    // Handles are in the middle.
+    let over_popup = layer
+        .is_some_and(|order| !matches!(order, egui::Order::Background | egui::Order::Middle));
     let popup = ctx.any_popup_open();
     *capture = InputCapture {
         pointer: over_ui || popup || ctx.egui_is_using_pointer(),
+        scroll: over_panel || over_popup || popup,
         keyboard: popup || ctx.egui_wants_keyboard_input(),
     };
     Ok(())

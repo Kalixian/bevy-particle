@@ -5,9 +5,10 @@ use bevy_particle::{EmitterState, SpaceState};
 use super::{
     documents::Documents,
     files::{Files, Notice},
-    inspector, manage, theme, Editor,
+    handles, inspector, manage, theme, Editor,
 };
 use crate::{
+    camera::SceneCamera,
     demos::{effect_path, Demos},
     input::InputCapture,
 };
@@ -27,6 +28,7 @@ pub(super) fn show(
     capture: Res<InputCapture>,
     spaces: Query<(&SpaceState, Option<&Children>)>,
     emitters: Query<&EmitterState>,
+    camera: Single<(&Camera, &Transform), With<SceneCamera>>,
     mut exit: MessageWriter<AppExit>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -98,7 +100,16 @@ pub(super) fn show(
             // Keeps the panel as wide as it was dragged.
             ui.take_available_space();
         });
-    editor.panel = Some(panel.response.rect);
+    let panel = panel.response.rect;
+    editor.panel = Some(panel);
+    if editor.open {
+        let area = window.with_min_x(panel.right());
+        let (scene, selection) = &editor.selection;
+        // Not its `GlobalTransform`, which may be from before it was panned this frame.
+        let (camera, transform) = *camera;
+        let camera = (camera, &GlobalTransform::from(*transform));
+        handles::show(ctx, scene, *selection, &mut documents, &ages, camera, area);
+    }
     Ok(())
 }
 

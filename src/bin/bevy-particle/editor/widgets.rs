@@ -11,8 +11,6 @@ use bevy_egui::egui::{
 };
 use bevy_particle::{Rgb, Shape, Spread};
 
-use super::curves;
-
 const LABEL_WIDTH: f32 = 92.0;
 const NUMBER_WIDTH: f32 = 64.0;
 const ROW_HEIGHT: f32 = 22.0;
@@ -116,6 +114,11 @@ impl Number {
         if self.log { bent.sinh() * self.knee() } else { bent }
     }
 
+    /// The closest value to this that's allowed.
+    pub fn limit(&self, value: f32) -> f32 {
+        value.clamp(*self.hard.start(), *self.hard.end())
+    }
+
     /// Sets a value from a shown one, unless that isn't a number.
     pub fn store(&self, value: &mut f32, shown: f32) {
         if shown.is_finite() {
@@ -158,14 +161,14 @@ pub fn row<R>(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui) ->
     .inner
 }
 
-/// A labeled row with a keyframe button. Returns whether that was clicked.
-pub fn key_row(
+/// A labeled row with a keyframe button, which `button` shows.
+pub fn key_row<R>(
     ui: &mut Ui,
     label: &str,
     hint: &str,
-    keyed: bool,
     add: impl FnOnce(&mut Ui),
-) -> bool {
+    button: impl FnOnce(&mut Ui) -> R,
+) -> R {
     row(ui, label, hint, |ui| {
         let width = ui.available_width() - KEY_WIDTH - ui.spacing().item_spacing.x;
         let layout = egui::Layout::left_to_right(egui::Align::Center);
@@ -173,7 +176,7 @@ pub fn key_row(
             ui.set_min_width(width);
             add(ui);
         });
-        curves::key_button(ui, keyed)
+        button(ui)
     })
 }
 
