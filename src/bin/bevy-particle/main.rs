@@ -3,6 +3,9 @@
 mod camera;
 mod cursor;
 mod demos;
+#[cfg(feature = "editor")]
+mod editor;
+mod input;
 #[cfg(feature = "profile")]
 mod profiling;
 
@@ -10,13 +13,16 @@ use bevy::prelude::*;
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins((
+    app.init_resource::<input::InputCapture>().add_plugins((
         default_plugins(),
         bevy_particle::ParticlePlugin,
         camera::CameraPlugin,
         cursor::CursorPlugin,
         demos::DemosPlugin,
     ));
+
+    #[cfg(feature = "editor")]
+    app.add_plugins(editor::EditorPlugin);
 
     #[cfg(feature = "profile")]
     app.add_plugins(profiling::ProfilingPlugin);

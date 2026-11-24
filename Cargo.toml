@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["editor"]
+# The demo app's editor panel. Libraries using this crate can turn it off with
+# `default-features = false`.
+editor = ["dep:bevy_egui"]
 # Logs per-pass GPU timings every 2 seconds and turns vsync off: `cargo run --features profile`
 profile = []
 # Reloads shaders and effects when they're saved: `cargo run --features hot-reload`
@@ -13,6 +17,8 @@ hot-reload = ["bevy/file_watcher", "bevy/embedded_watcher"]
 # Only the 2D parts of Bevy, which keeps builds and the web download smaller. The camera's
 # tonemapper needs tonemapping_luts, which is zstd-compressed.
 bevy = { version = "0.20.1", default-features = false, features = ["2d", "serialize", "tonemapping_luts", "zstd_rust"] }
+# Drawn by its own camera (see src/bin/bevy-particle/editor), so Bevy's UI isn't needed.
+bevy_egui = { version = "0.43.1", default-features = false, features = ["render", "default_fonts", "manage_clipboard"], optional = true }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 ron = "0.12.3"
 serde = { version = "1.0.229", features = ["derive"] }

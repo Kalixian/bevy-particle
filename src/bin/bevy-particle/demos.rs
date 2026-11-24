@@ -12,6 +12,8 @@ use bevy::{
 use bevy_particle::{ParticleEffect, ParticleSpace};
 use serde::Deserialize;
 
+use crate::input::{CaptureSystems, InputCapture};
+
 const LIST_PATH: &str = "demos.ron";
 const SCENE_KEYS: [KeyCode; 9] = [
     KeyCode::Digit1,
@@ -33,7 +35,7 @@ impl Plugin for DemosPlugin {
             .init_asset_loader::<DemoListLoader>()
             .init_resource::<Demos>()
             .add_systems(Startup, load_list)
-            .add_systems(Update, (read_list, select_scene).chain());
+            .add_systems(Update, (read_list, pick_scene.after(CaptureSystems), respawn_scene).chain());
     }
 }
 
@@ -85,13 +87,34 @@ impl AssetLoader for DemoListLoader {
 }
 
 #[derive(Resource, Default)]
-struct Demos {
+pub struct Demos {
     list: Handle<DemoList>,
     scenes: Vec<(String, Handle<ParticleEffect>)>,
     /// Index of the scene on screen.
     current: usize,
     /// The current scene should be (re)spawned once it's loaded.
     respawn: bool,
+}
+
+#[cfg(feature = "editor")]
+impl Demos {
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.scenes.iter().map(|(name, _)| name.as_str())
+    }
+
+    /// Index of the scene on screen.
+    pub fn current(&self) -> usize {
+        self.current
+    }
+
+    pub fn show(&mut self, index: usize) {
+        self.current = index;
+        self.respawn = true;
+    }
+
+    pub fn restart(&mut self) {
+        self.respawn = true;
+    }
 }
 
 fn load_list(mut demos: ResMut<Demos>, assets: Res<AssetServer>) {
@@ -130,16 +153,15 @@ fn read_list(
     demos.respawn = true;
 }
 
-/// Replaces the space when a scene is picked, restarted (`R`), or reloaded from disk.
-fn select_scene(
-    mut commands: Commands,
+/// Picks or restarts a scene with the keyboard.
+fn pick_scene(
     keys: Res<ButtonInput<KeyCode>>,
-    mut events: MessageReader<AssetEvent<ParticleEffect>>,
-    effects: Res<Assets<ParticleEffect>>,
+    capture: Res<InputCapture>,
     mut demos: ResMut<Demos>,
-    spaces: Query<Entity, With<ParticleSpace>>,
-    mut window: Single<&mut Window, With<PrimaryWindow>>,
 ) {
+    if capture.keyboard {
+        return;
+    }
     for (index, key) in SCENE_KEYS.iter().enumerate().take(demos.scenes.len()) {
         if keys.just_pressed(*key) {
             demos.current = index;
@@ -156,6 +178,20 @@ fn select_scene(
             }
         }
     }
+    if keys.just_pressed(KeyCode::KeyR) {
+        demos.respawn = true;
+    }
+}
+
+/// Replaces the space when a scene is picked, restarted, or reloaded from disk.
+fn respawn_scene(
+    mut commands: Commands,
+    mut events: MessageReader<AssetEvent<ParticleEffect>>,
+    effects: Res<Assets<ParticleEffect>>,
+    mut demos: ResMut<Demos>,
+    spaces: Query<Entity, With<ParticleSpace>>,
+    mut window: Single<&mut Window, With<PrimaryWindow>>,
+) {
     let Some((name, handle)) = demos.scenes.get(demos.current).cloned() else {
         return;
     };
@@ -164,7 +200,7 @@ fn select_scene(
         .filter(|event| event.is_modified(&handle))
         .count()
         > 0;
-    demos.respawn |= reloaded || keys.just_pressed(KeyCode::KeyR);
+    demos.respawn |= reloaded;
     if !demos.respawn {
         return;
     }
