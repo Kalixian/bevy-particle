@@ -1,7 +1,7 @@
 // Draws one quad per live particle (6 vertices, one instance each) straight from the particle
 // buffer, as a disk or with a texture.
 
-import package::gpu::shaders::types::Particle;
+import package::gpu::shaders::types::{Particle, unpack_color};
 import package::gpu::shaders::random::pcg_hash;
 
 // Only the first field of Bevy's `View` uniform; the rest of the binding is ignored.
@@ -58,20 +58,25 @@ fn vertex(
     var offset = corner * p.radius;
     let speed = length(p.velocity);
     if settings.stretch > 0.0 && speed > 0.0 {
-        let along = p.velocity / speed;
-        let across = vec2(-along.y, along.x);
-        offset += vec2(corner.x * 0.5 * speed * settings.stretch, 0.0);
-        offset = along * offset.x + across * offset.y;
+        offset.x += corner.x * 0.5 * speed * settings.stretch;
+        offset = rotate(offset, p.velocity / speed);
     }
+    // On top of any turn towards the velocity.
+    offset = rotate(offset, vec2(cos(p.rotation), sin(p.rotation)));
     out.clip_position = view.clip_from_world * vec4(p.position + offset, settings.z, 1.0);
     out.local = corner;
-    out.color = p.color;
+    out.color = unpack_color(p.color);
 
     let frame = texture_frame(p, slot);
     let cell = vec2(f32(frame % settings.columns), f32(frame / settings.columns));
     let within = vec2(corner.x, -corner.y) * 0.5 + 0.5;
     out.uv = (cell + within) / vec2(f32(settings.columns), f32(settings.rows));
     return out;
+}
+
+// Turns `v` by the angle of the unit vector `direction`.
+fn rotate(v: vec2<f32>, direction: vec2<f32>) -> vec2<f32> {
+    return direction * v.x + vec2(-direction.y, direction.x) * v.y;
 }
 
 fn texture_frame(p: Particle, slot: u32) -> u32 {

@@ -1,7 +1,8 @@
 // Particle simulation: `integrate` runs once per slot, then `spawn` once per spawn request.
 
 import package::gpu::shaders::types::{
-    Particle, SimParams, Modifier, is_alive, pack_emitter, emitter_slot, emitter_generation
+    Particle, SimParams, Modifier, is_alive, pack_emitter, emitter_slot, emitter_generation,
+    pack_color, unpack_color
 };
 import package::gpu::shaders::random::{pcg_hash, rand};
 import package::gpu::shaders::modifier_kinds::{
@@ -25,6 +26,8 @@ struct Emitter {
     green: vec2<f32>,
     blue: vec2<f32>,
     alpha: vec2<f32>,
+    rotation: vec2<f32>,
+    spin: vec2<f32>,
     mass_per_radius: f32,
     // Not about this emitter: entry i of the spawn table is kept in array element i, to save a
     // binding. Entries are sorted by first request number, and cover all spaces.
@@ -44,6 +47,8 @@ struct Emitter {
     green_curve: u32,
     blue_curve: u32,
     alpha_curve: u32,
+    rotation_curve: u32,
+    spin_curve: u32,
 }
 
 // A `Spread` shape as a lookup table: t at u = i / (CURVE_SAMPLES - 1), four per vec4.
@@ -53,6 +58,8 @@ const NO_CURVE: u32 = 0xFFFFFFFFu;
 struct Curve {
     samples: array<vec4<f32>, 8>,
 }
+
+const TAU: f32 = 6.2831853;
 
 // Stack of dead slot indices. `count` is signed so that failed pops can briefly
 // take it below zero without wrapping (see `spawn`).
@@ -132,7 +139,7 @@ fn integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // Start from the spawn appearance, so that scaling doesn't compound across frames.
-    p.color = vec4(unpack2x16float(p.base_color.x), unpack2x16float(p.base_color.y));
+    p.color = p.base_color;
     p.radius = p.base_radius;
     p.mass = p.base_radius * emitter.mass_per_radius;
 
@@ -146,6 +153,8 @@ fn integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     apply_appearances(&p, emitter.modifiers);
 
     p.position += p.velocity * params.dt;
+    // Wrapped, to stay precise for particles that live long.
+    p.rotation = (p.rotation + p.spin * params.dt) % TAU;
     particles[i] = p;
 }
 
@@ -255,12 +264,15 @@ fn apply_appearance(p: ptr<function, Particle>, modifier: Modifier) {
     switch m.kind {
         case MOD_COLOR: {
             let c = color_params(m);
-            let rgb = c.value * select(vec3(1.0), (*p).color.rgb, c.scale != 0.0);
-            (*p).color = vec4(rgb, (*p).color.a);
+            let color = unpack_color((*p).color);
+            let rgb = c.value * select(vec3(1.0), color.rgb, c.scale != 0.0);
+            (*p).color = pack_color(vec4(rgb, color.a));
         }
         case MOD_ALPHA: {
             let a = alpha_params(m);
-            (*p).color.a = a.value * select(1.0, (*p).color.a, a.scale != 0.0);
+            let color = unpack_color((*p).color);
+            let alpha = a.value * select(1.0, color.a, a.scale != 0.0);
+            (*p).color = pack_color(vec4(color.rgb, alpha));
         }
         case MOD_SIZE: {
             let s = size_params(m);
@@ -321,20 +333,22 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     );
 
     let alpha = sample_spread(em.alpha, em.alpha_curve, &rng);
+    let rotation = sample_spread(em.rotation, em.rotation_curve, &rng);
+    let spin = sample_spread(em.spin, em.spin_curve, &rng);
 
     var p: Particle;
     p.position = em.position + offset;
     p.velocity = vec2(cos(direction), sin(direction)) * speed;
-    p.color = vec4(srgb_to_linear(srgb), alpha);
+    p.color = pack_color(vec4(srgb_to_linear(srgb), alpha));
     p.mass = radius * em.mass_per_radius;
     p.radius = radius;
     p.age = 0.0;
     p.lifetime = lifetime;
     p.emitter = pack_emitter(e, em.generation);
     p.base_radius = radius;
-    // 65504 is the largest half float.
-    let packed = clamp(p.color, vec4(-65504.0), vec4(65504.0));
-    p.base_color = vec2(pack2x16float(packed.xy), pack2x16float(packed.zw));
+    p.base_color = p.color;
+    p.rotation = rotation;
+    p.spin = spin;
     // `integrate` won't see this particle until next frame, but it's drawn this frame: apply
     // appearance now so that e.g. a fade-in doesn't flash.
     apply_appearances(&p, params.modifiers);

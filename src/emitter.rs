@@ -73,6 +73,13 @@ pub struct ParticleEmitter {
     pub blue: Spread,
     /// Alpha range (opacity).
     pub alpha: Spread,
+    /// How far each particle is turned when it spawns, in radians counter-clockwise; `0.0..TAU` = any way up.
+    /// Independent of `angle`. Shows on textures and stretched disks. Where
+    /// `ParticleRender::stretch` turns particles along their velocity, this adds to it.
+    pub rotation: Spread,
+    /// How fast each particle turns, in radians per second; negative = clockwise.
+    /// `-1.0..1.0` = either way.
+    pub spin: Spread,
     /// Whether this emitter's particles take part in the space's `Gravity`
     /// (attract each other and feel the pull). Brute-force cost grows with the square of
     /// all participating particles, so turn it on only for modest counts for now.
@@ -94,6 +101,8 @@ impl Default for ParticleEmitter {
             green: (1.0..1.0).into(),
             blue: (1.0..1.0).into(),
             alpha: (1.0..1.0).into(),
+            rotation: (0.0..0.0).into(),
+            spin: (0.0..0.0).into(),
             gravity: false,
         }
     }
@@ -171,6 +180,8 @@ pub struct GpuEmitter {
     pub green: Vec2,
     pub blue: Vec2,
     pub alpha: Vec2,
+    pub rotation: Vec2,
+    pub spin: Vec2,
     pub mass_per_radius: f32,
     /// Entry i of the spawn table (see [`SpawnTable`]) is kept in array element i, to save a
     /// binding; it isn't about this emitter.
@@ -192,6 +203,8 @@ pub struct GpuEmitter {
     pub green_curve: u32,
     pub blue_curve: u32,
     pub alpha_curve: u32,
+    pub rotation_curve: u32,
+    pub spin_curve: u32,
 }
 
 /// This frame's emitter array (shared by all spaces), sent to the render world.
@@ -347,6 +360,8 @@ fn prepare_emitter_upload(
         let (green, green_curve) = emitter.green.to_gpu(curves);
         let (blue, blue_curve) = emitter.blue.to_gpu(curves);
         let (alpha, alpha_curve) = emitter.alpha.to_gpu(curves);
+        let (rotation, rotation_curve) = emitter.rotation.to_gpu(curves);
+        let (spin, spin_curve) = emitter.spin.to_gpu(curves);
 
         upload.emitters.push(GpuEmitter {
             position,
@@ -359,6 +374,8 @@ fn prepare_emitter_upload(
             green,
             blue,
             alpha,
+            rotation,
+            spin,
             mass_per_radius: emitter.mass_per_radius,
             // The spawn table is filled in below.
             table_first: 0,
@@ -375,6 +392,8 @@ fn prepare_emitter_upload(
             green_curve,
             blue_curve,
             alpha_curve,
+            rotation_curve,
+            spin_curve,
         });
     }
 

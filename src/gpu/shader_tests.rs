@@ -171,7 +171,8 @@ fn particle_layout_matches() {
         };
     }
     let fields = offsets!(
-        position, velocity, color, mass, radius, age, lifetime, emitter, base_radius, base_color
+        position, velocity, color, mass, radius, age, lifetime, emitter, base_radius, base_color,
+        rotation, spin
     );
     let rust = (fields, size_of::<GpuParticle>() as u64);
     for shader in ["particle_sim", "particle_draw", "live"] {

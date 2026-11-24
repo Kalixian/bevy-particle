@@ -4,8 +4,8 @@ use bytemuck::{Pod, Zeroable};
 /// One particle slot in the GPU particle buffer.
 ///
 /// Must match `struct Particle` in `types.wesl`.
-/// Layout (std430, 64 bytes): position @0, velocity @8, color @16, mass @32, radius @36,
-/// age @40, lifetime @44, emitter @48, base_radius @52, base_color @56.
+/// Layout (std430, 64 bytes): position @0, velocity @8, color @16, mass @24, radius @28,
+/// age @32, lifetime @36, emitter @40, base_radius @44, base_color @48, rotation @56, spin @60.
 ///
 /// A slot is alive when `lifetime < 0` (immortal) or `age < lifetime`.
 /// An all-zero slot is dead, so a zero-initialized buffer starts empty.
@@ -14,8 +14,8 @@ use bytemuck::{Pod, Zeroable};
 pub struct GpuParticle {
     pub position: [f32; 2],
     pub velocity: [f32; 2],
-    /// Linear RGBA (values above 1.0 are HDR and drive bloom).
-    pub color: [f32; 4],
+    /// Linear RGBA packed as four half floats (values above 1.0 are HDR and drive bloom).
+    pub color: [u32; 2],
     pub mass: f32,
     pub radius: f32,
     /// Seconds since spawn.
@@ -30,6 +30,10 @@ pub struct GpuParticle {
     pub base_radius: f32,
     /// Linear RGBA packed as four half floats.
     pub base_color: [u32; 2],
+    /// Radians, counter-clockwise.
+    pub rotation: f32,
+    /// Radians per second, counter-clockwise.
+    pub spin: f32,
 }
 
 const _: () = assert!(size_of::<GpuParticle>() == 64);

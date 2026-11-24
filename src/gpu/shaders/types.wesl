@@ -5,7 +5,8 @@
 struct Particle {
     position: vec2<f32>,
     velocity: vec2<f32>,
-    color: vec4<f32>,
+    // See `pack_color`.
+    color: vec2<u32>,
     mass: f32,
     radius: f32,
     age: f32,
@@ -15,6 +16,10 @@ struct Particle {
     // Spawn values that appearance modifiers start from each frame.
     base_radius: f32,
     base_color: vec2<u32>,
+    // Radians, counter-clockwise.
+    rotation: f32,
+    // Radians per second.
+    spin: f32,
 }
 
 // Must match `SimParams` in src/space.rs.
@@ -50,6 +55,17 @@ struct Modifier {
 
 fn is_alive(p: Particle) -> bool {
     return p.lifetime < 0.0 || p.age < p.lifetime;
+}
+
+// Linear RGBA as four half floats.
+fn pack_color(color: vec4<f32>) -> vec2<u32> {
+    // 65504 is the largest half float.
+    let c = clamp(color, vec4(-65504.0), vec4(65504.0));
+    return vec2(pack2x16float(c.xy), pack2x16float(c.zw));
+}
+
+fn unpack_color(packed: vec2<u32>) -> vec4<f32> {
+    return vec4(unpack2x16float(packed.x), unpack2x16float(packed.y));
 }
 
 // Emitter references pack the slot into the low 16 bits and the generation into the high 16.

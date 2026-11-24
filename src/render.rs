@@ -13,7 +13,8 @@ pub struct ParticleRender {
     /// Textured particles ignore it.
     pub softness: f32,
     /// Stretches particles along their velocity, by the distance they travel in this many
-    /// seconds. Above 0, textures are turned so that +X points along the velocity.
+    /// seconds. Above 0, textures are turned so that +X points along the velocity, plus the
+    /// particle's rotation.
     pub stretch: f32,
     /// Drawn on a square around the particle, tinted by its color. Nothing is drawn until it
     /// has loaded.
