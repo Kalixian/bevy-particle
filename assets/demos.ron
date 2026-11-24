@@ -38,6 +38,9 @@
         "smoke",
         "collision",
         "areas",
+        "galaxy",
+        "mandala",
+        "autumn",
         "showcase",
     ],
 )

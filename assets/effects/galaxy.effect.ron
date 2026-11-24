@@ -1,0 +1,66 @@
+// A spiral galaxy under its own gravity (320,000 bodies), and a companion that swings past and
+// pulls out its arms. Rings start in orbit: `Outward` plus a quarter turn is sideways, at the
+// speed that balances the mass inside.
+(
+    space: (capacity: 320000),
+    render: (blend: Additive, softness: 1.0, stretch: 0.012),
+    gravity: (strength: 3.0, softening: 16.0, method: BarnesHut, theta: 0.6),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    modifiers: [
+        // The dark matter that holds it all together.
+        PointAttractor(offset: Constant((0.0, 0.0)), strength: Constant(3500000.0), max_accel: Constant(400.0)),
+    ],
+    emitters: [
+        // The bulge.
+        (source: Inline((
+            emitter: (
+                burst_count: 90000, rate: 0.0, lifetime: None,
+                spawn: Ring(radius: (from: 0.0, to: 75.0)),
+                direction: Outward, angle: (from: 0.9, to: 2.24), speed: (from: 40.0, to: 170.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)), mass_per_radius: 6.0, gravity: true,
+                red: (from: 2.6, to: 3.4), green: (from: 1.5, to: 2.1), blue: (from: 0.6, to: 1.0), alpha: (from: 0.03, to: 0.09),
+            ),
+        ))),
+        // The disk, from the inside out.
+        (source: Inline((
+            emitter: (
+                burst_count: 70000, rate: 0.0, lifetime: None,
+                spawn: Ring(radius: (from: 70.0, to: 170.0)),
+                direction: Outward, angle: (from: 1.45, to: 1.69, shape: Middle(2.0)), speed: (from: 175.0, to: 205.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)), mass_per_radius: 6.0, gravity: true,
+                red: (from: 1.8, to: 2.4), green: (from: 1.4, to: 1.8), blue: (from: 1.2, to: 1.7), alpha: (from: 0.04, to: 0.12),
+            ),
+        ))),
+        (source: Inline((
+            emitter: (
+                burst_count: 65000, rate: 0.0, lifetime: None,
+                spawn: Ring(radius: (from: 165.0, to: 250.0)),
+                direction: Outward, angle: (from: 1.45, to: 1.69, shape: Middle(2.0)), speed: (from: 155.0, to: 180.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)), mass_per_radius: 6.0, gravity: true,
+                red: (from: 0.8, to: 1.2), green: (from: 1.1, to: 1.5), blue: (from: 1.8, to: 2.6), alpha: (from: 0.04, to: 0.12),
+            ),
+        ))),
+        (source: Inline((
+            emitter: (
+                burst_count: 55000, rate: 0.0, lifetime: None,
+                spawn: Ring(radius: (from: 245.0, to: 320.0)),
+                direction: Outward, angle: (from: 1.45, to: 1.69, shape: Middle(2.0)), speed: (from: 142.0, to: 160.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)), mass_per_radius: 6.0, gravity: true,
+                red: (from: 0.4, to: 0.9), green: (from: 0.7, to: 1.1), blue: (from: 2.0, to: 3.0), alpha: (from: 0.04, to: 0.12),
+            ),
+        ))),
+        // The companion turns the other way. A push sends it past.
+        (position: (480.0, 250.0), source: Inline((
+            emitter: (
+                burst_count: 40000, rate: 0.0, lifetime: None,
+                spawn: Ring(radius: (from: 0.0, to: 45.0)),
+                direction: Outward, angle: (from: -2.24, to: -0.9), speed: (from: 40.0, to: 95.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)), mass_per_radius: 6.0, gravity: true,
+                red: (from: 2.8, to: 3.4), green: (from: 0.5, to: 0.9), blue: (from: 1.2, to: 1.9), alpha: (from: 0.04, to: 0.12),
+            ),
+            modifiers: [
+                Acceleration(Track((clock: Time, keys: [(time: 0.0, value: (-100.0, 45.0), ease: Step), (time: 1.0, value: (0.0, 0.0))]))),
+            ],
+        ))),
+    ],
+)
