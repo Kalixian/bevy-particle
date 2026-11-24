@@ -27,7 +27,7 @@ pub(crate) enum ModifierKind {
 /// When a modifier runs. Within a phase, the space's modifiers run before the emitter's, each
 /// in list order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Phase {
+pub enum Phase {
     /// Changes velocity.
     Force,
     /// Limits the motion that all forces (and gravity) add up to.

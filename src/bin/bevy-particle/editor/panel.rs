@@ -4,7 +4,7 @@ use bevy_egui::{egui, EguiContexts};
 use super::{
     documents::Documents,
     files::{Files, Notice},
-    theme, Editor,
+    inspector, theme, Editor,
 };
 use crate::{
     demos::{effect_path, Demos},
@@ -13,6 +13,8 @@ use crate::{
 
 const MARGIN: i8 = 8;
 const DOTS_SIZE: egui::Vec2 = egui::Vec2::splat(28.0);
+/// Fits the widest rows of the inspector.
+const MIN_WIDTH: f32 = 310.0;
 const RESTART_WIDTH: f32 = 64.0;
 
 pub(super) fn show(
@@ -47,19 +49,23 @@ pub(super) fn show(
         egui::UiBuilder::new().layer_id(egui::LayerId::background()).max_rect(window),
     );
     // Leave some of the scene visible in narrow windows.
-    let max_width = (window.width() - 80.0).clamp(240.0, 640.0);
+    let max_width = (window.width() - 80.0).clamp(MIN_WIDTH, 640.0);
     let panel = egui::Panel::left("editor panel")
         .default_size(360.0)
-        .size_range(240.0..=max_width)
+        .size_range(MIN_WIDTH..=max_width)
         .frame(egui::Frame::new().fill(theme::PANEL_FILL).inner_margin(MARGIN))
         .show(&mut root, |ui| {
             show_header(ui, &mut editor, &mut demos, &documents);
             let scene = demos.names().nth(demos.current()).map(effect_path);
             if let Some(scene) = scene {
+                undo_shortcuts(ctx, &scene, &mut documents);
                 show_files(ui, &scene, &mut documents, &mut files);
+                ui.separator();
+                if editor.selection.0 != scene {
+                    editor.selection = (scene.clone(), default());
+                }
+                inspector::show(ui, &scene, &mut editor.selection.1, &mut documents);
             }
-            ui.separator();
-            ui.weak("Scene and emitter settings will go here.");
             // Keeps the panel as wide as it was dragged.
             ui.take_available_space();
         });
@@ -117,6 +123,23 @@ fn show_header(
     });
 }
 
+fn undo_shortcuts(ctx: &egui::Context, scene: &str, documents: &mut Documents) {
+    // Text fields have their own.
+    if ctx.egui_wants_keyboard_input() {
+        return;
+    }
+    let pressed = |modifiers, key| {
+        ctx.input_mut(|input| input.consume_shortcut(&egui::KeyboardShortcut::new(modifiers, key)))
+    };
+    let command = egui::Modifiers::COMMAND;
+    // First, since shortcuts ignore extra modifiers.
+    if pressed(command | egui::Modifiers::SHIFT, egui::Key::Z) || pressed(command, egui::Key::Y) {
+        documents.redo(scene);
+    } else if pressed(command, egui::Key::Z) {
+        documents.undo(scene);
+    }
+}
+
 /// Saving, and what there is to say about it.
 fn show_files(ui: &mut egui::Ui, scene: &str, documents: &mut Documents, files: &mut Files) {
     if !documents.is_open(scene) {
@@ -136,7 +159,16 @@ fn show_files(ui: &mut egui::Ui, scene: &str, documents: &mut Documents, files: 
             for path in &dirty {
                 documents.revert(path);
             }
+            documents.end_group();
             files.notice = None;
+        }
+        let button = ui.add_enabled(documents.can_undo(scene), egui::Button::new("Undo"));
+        if button.on_hover_text("Ctrl+Z").clicked() {
+            documents.undo(scene);
+        }
+        let button = ui.add_enabled(documents.can_redo(scene), egui::Button::new("Redo"));
+        if button.on_hover_text("Ctrl+Shift+Z or Ctrl+Y").clicked() {
+            documents.redo(scene);
         }
         #[cfg(target_arch = "wasm32")]
         {

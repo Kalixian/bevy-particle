@@ -39,6 +39,18 @@ mod desktop {
         Ok(replace_file(&file_path(path)?, text)?)
     }
 
+    /// The images in the texture folder, as paths in the asset folder.
+    pub fn list_textures() -> Vec<String> {
+        let files = file_path("textures").ok().and_then(|folder| fs::read_dir(folder).ok());
+        files
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".png"))
+            .map(|name| format!("textures/{name}"))
+            .collect()
+    }
+
     /// Never leaves a half-written file behind.
     pub(super) fn replace_file(path: &Path, text: &str) -> io::Result<()> {
         let mut temporary = path.as_os_str().to_owned();
@@ -132,6 +144,11 @@ mod web {
             )
             .map_err(error)?;
         Ok(())
+    }
+
+    /// Folders can't be listed here.
+    pub fn list_textures() -> Vec<String> {
+        Vec::new()
     }
 
     /// Lets the user pick files; see [`take_uploads`].

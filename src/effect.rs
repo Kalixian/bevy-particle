@@ -107,6 +107,55 @@ impl ParticleEffect {
         }
         space
     }
+
+    /// Changes what `old` spawned into this effect, leaving existing particles in place.
+    /// `emitters` are the space's child emitters, in order.
+    ///
+    /// Returns `false`, without doing anything, if only a respawn can make the change: to the
+    /// capacity, or to the number of emitters. A changed burst shows the next time the effect is
+    /// spawned.
+    pub fn update(
+        &self,
+        old: &Self,
+        commands: &mut Commands,
+        space: Entity,
+        emitters: &[Entity],
+    ) -> bool {
+        if self.space != old.space
+            || self.emitters.len() != old.emitters.len()
+            || self.emitters.len() != emitters.len()
+        {
+            return false;
+        }
+        let mut space = commands.entity(space);
+        space.insert((self.render.clone(), self.modifiers.clone()));
+        set_component(&mut space, self.gravity);
+        set_component(&mut space, self.attractor.clone());
+
+        for ((entry, old), entity) in self.emitters.iter().zip(&old.emitters).zip(emitters) {
+            let EffectEmitter { position, rotation, motion, def } = entry;
+            let mut emitter = commands.entity(*entity);
+            emitter.insert((def.emitter.clone(), def.modifiers.clone()));
+            set_component(&mut emitter, def.tracks.clone());
+            set_component(&mut emitter, def.attractor.clone());
+            set_component(&mut emitter, (!motion.is_empty()).then(|| motion.clone()));
+            let placement = (position, rotation, motion);
+            if placement != (&old.position, &old.rotation, &old.motion) {
+                emitter.insert(
+                    Transform::from_translation(position.extend(0.0))
+                        .with_rotation(Quat::from_rotation_z(*rotation)),
+                );
+            }
+        }
+        true
+    }
+}
+
+fn set_component<T: Component>(entity: &mut EntityCommands, component: Option<T>) {
+    match component {
+        Some(component) => entity.insert(component),
+        None => entity.remove::<T>(),
+    };
 }
 
 #[derive(Default, TypePath)]
@@ -291,6 +340,64 @@ mod tests {
 
         world.despawn(space);
         assert_eq!(emitters.iter(&world).count(), 0);
+    }
+
+    #[test]
+    fn spawned_effects_can_be_updated_in_place() {
+        #[derive(Resource, Default)]
+        struct AddedEmitters(usize);
+
+        let file = r#"(
+            space: (capacity: 8),
+            gravity: (strength: 1.0, softening: 1.0, method: BruteForce, theta: 0.5),
+            emitters: [
+                (source: Inline((emitter: (rate: 1.0))), position: (1.0, 2.0)),
+                (source: Inline((tracks: (rate: (clock: Time, keys: [(time: 0.0, value: 1.0)]))))),
+            ],
+        )"#;
+        let file = EffectFile::from_ron(file).unwrap();
+        let old = file.build(&"a".into(), |_| unreachable!(), |_| default()).unwrap();
+
+        let mut app = App::new();
+        app.init_resource::<AddedEmitters>().add_systems(
+            Update,
+            |added: Query<(), Added<ParticleEmitter>>, mut count: ResMut<AddedEmitters>| {
+                count.0 += added.iter().count();
+            },
+        );
+        let space = old.spawn(&mut app.world_mut().commands());
+        app.update();
+        let emitters = app.world().get::<Children>(space).unwrap().to_vec();
+
+        let mut new = old.clone();
+        new.gravity = None;
+        new.emitters[0].def.emitter.rate = 5.0;
+        new.emitters[0].def.tracks = Some(default());
+        new.emitters[1].position = Vec2::X;
+        new.emitters[1].def.tracks = None;
+        // Something else moved the first one, whose placement doesn't change.
+        app.world_mut().get_mut::<Transform>(emitters[0]).unwrap().translation.z = 7.0;
+        assert!(new.update(&old, &mut app.world_mut().commands(), space, &emitters));
+        app.update();
+
+        let world = app.world();
+        assert!(world.get::<Gravity>(space).is_none());
+        assert_eq!(world.get::<ParticleEmitter>(emitters[0]).unwrap().rate, 5.0);
+        assert!(world.get::<EmitterTracks>(emitters[0]).is_some());
+        assert!(world.get::<EmitterTracks>(emitters[1]).is_none());
+        let position = |entity| world.get::<Transform>(entity).unwrap().translation;
+        assert_eq!(position(emitters[0]), Vec3::new(1.0, 2.0, 7.0));
+        assert_eq!(position(emitters[1]), Vec3::X);
+        // Emitters must not register again.
+        assert_eq!(world.resource::<AddedEmitters>().0, 2);
+
+        let mut bigger = old.clone();
+        bigger.space.capacity = 9;
+        let mut fewer = old.clone();
+        fewer.emitters.pop();
+        for new in [bigger, fewer] {
+            assert!(!new.update(&old, &mut app.world_mut().commands(), space, &emitters));
+        }
     }
 
     #[test]

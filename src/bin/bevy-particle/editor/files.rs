@@ -215,30 +215,37 @@ fn keep_unsaved_changes(
     }
 }
 
-/// Puts changed documents on screen. Replacing a shown effect respawns it.
+/// Puts changed documents on screen.
 fn update_effects(
-    demos: Res<Demos>,
+    mut demos: ResMut<Demos>,
     assets: Res<AssetServer>,
     mut files: ResMut<Files>,
     mut documents: ResMut<Documents>,
     mut effects: ResMut<Assets<ParticleEffect>>,
 ) {
     let changed = documents.take_changed();
-    for name in demos.names() {
+    if changed.is_empty() {
+        return;
+    }
+    let names: Vec<_> = demos.names().map(String::from).collect();
+    for (index, name) in names.iter().enumerate() {
         let scene = effect_path(name);
-        if changed.is_empty() || !documents.files_of(&scene).iter().any(|f| changed.contains(f)) {
+        if !documents.files_of(&scene).iter().any(|f| changed.contains(f)) {
             continue;
         }
-        let Some(handle) = demos.handle(name) else {
+        let Some(handle) = demos.handle(name).cloned() else {
             continue;
         };
         match documents.build(&scene, |path| assets.load(path)) {
             Ok(effect) => {
                 // Compared as text because NaNs don't equal themselves, and would be replaced
                 // over and over.
-                let current = effects.get(handle).map(|effect| format!("{effect:?}"));
+                let current = effects.get(&handle).map(|effect| format!("{effect:?}"));
                 if current != Some(format!("{effect:?}")) {
                     let _ = effects.insert(handle.id(), effect);
+                    if index == demos.current() {
+                        demos.update_live();
+                    }
                 }
             }
             Err(error) => files.error(&scene, error),

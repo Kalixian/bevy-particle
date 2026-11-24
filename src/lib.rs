@@ -48,7 +48,7 @@ pub use effect_file::{EffectFile, EmitterEntry, EmitterSource, RenderFile, Textu
 pub use emitter::{EmitterState, ParticleEmitter};
 pub use emitter_tracks::{AreaTracks, EmitterMotion, EmitterTracks};
 pub use gravity::{Gravity, GravityMethod, MAX_GRAVITY_BODIES};
-pub use modifier::{AttractorTarget, Blend, Modifier, Modifiers, TargetAttractor};
+pub use modifier::{AttractorTarget, Blend, Modifier, Modifiers, Phase, TargetAttractor};
 pub use render::{BlendMode, ParticleRender, ParticleTexture, Playback};
 pub use space::{ParticleSpace, SpaceState};
 pub use spread::{Shape, Spread};

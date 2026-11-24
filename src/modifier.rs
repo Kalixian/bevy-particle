@@ -4,8 +4,10 @@ use bevy::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use crate::modifier_kinds::Phase;
+
 use crate::{
-    modifier_kinds::{ModifierKind, Phase},
+    modifier_kinds::ModifierKind,
     track::{Animated, GpuTrackRecord, ParamEncoder, Rgb},
 };
 
@@ -120,6 +122,11 @@ impl Modifier {
             Modifier::Mass(..) => ModifierKind::Mass,
         }
     }
+
+    /// When it runs, relative to other modifiers.
+    pub fn phase(&self) -> Phase {
+        self.kind().def().phase
+    }
 }
 
 /// How an appearance modifier combines with the particle's current value.
@@ -231,7 +238,7 @@ impl ModifierUpload {
         for (i, phase) in Phase::ALL.into_iter().enumerate() {
             range[i] = self.modifiers.len() as u32;
             for modifier in modifiers.iter().flat_map(|list| list.iter()) {
-                if modifier.kind().def().phase == phase {
+                if modifier.phase() == phase {
                     self.push_one(modifier, origin, owner_age);
                 }
             }

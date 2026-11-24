@@ -10,7 +10,7 @@ use bevy::{
     prelude::*,
     window::PrimaryWindow,
 };
-use bevy_particle::{ParticleEffect, ParticleSpace};
+use bevy_particle::{ParticleEffect, ParticleEmitter, ParticleSpace};
 use serde::Deserialize;
 
 use crate::input::{CaptureSystems, InputCapture};
@@ -95,6 +95,8 @@ pub struct Demos {
     current: usize,
     /// The current scene as it was spawned.
     shown: Option<ParticleEffect>,
+    /// The next change to the current scene should be made without respawning it.
+    live: bool,
     /// The current scene should be (re)spawned once it's loaded.
     respawn: bool,
 }
@@ -117,6 +119,12 @@ impl Demos {
     pub fn show(&mut self, index: usize) {
         self.current = index;
         self.respawn = true;
+    }
+
+    /// Has the next change to the current scene's effect leave existing particles in place, if
+    /// possible.
+    pub fn update_live(&mut self) {
+        self.live = true;
     }
 
     pub fn restart(&mut self) {
@@ -196,7 +204,8 @@ fn respawn_scene(
     mut events: MessageReader<AssetEvent<ParticleEffect>>,
     effects: Res<Assets<ParticleEffect>>,
     mut demos: ResMut<Demos>,
-    spaces: Query<Entity, With<ParticleSpace>>,
+    spaces: Query<(Entity, Option<&Children>), With<ParticleSpace>>,
+    emitters: Query<(), With<ParticleEmitter>>,
     mut window: Single<&mut Window, With<PrimaryWindow>>,
 ) {
     let Some((name, handle)) = demos.scenes.get(demos.current).cloned() else {
@@ -208,7 +217,22 @@ fn respawn_scene(
         .count()
         > 0;
     // Saving a file without really changing it doesn't restart anything.
-    demos.respawn |= reloaded && effects.get(&handle) != demos.shown.as_ref();
+    let changed = reloaded && effects.get(&handle) != demos.shown.as_ref();
+    if changed
+        && demos.live
+        && !demos.respawn
+        && let (Some(effect), Some(shown)) = (effects.get(&handle), &demos.shown)
+        && let Ok((space, children)) = spaces.single()
+    {
+        let children = children.into_iter().flatten().copied();
+        let children: Vec<_> = children.filter(|child| emitters.contains(*child)).collect();
+        if effect.update(shown, &mut commands, space, &children) {
+            demos.shown = Some(effect.clone());
+            demos.live = false;
+            return;
+        }
+    }
+    demos.respawn |= changed;
     if !demos.respawn {
         return;
     }
@@ -216,9 +240,10 @@ fn respawn_scene(
         return; // Still loading.
     };
     demos.respawn = false;
+    demos.live = false;
     demos.shown = Some(effect.clone());
 
-    for space in &spaces {
+    for (space, _) in &spaces {
         // Despawning a space despawns its child emitters too.
         commands.entity(space).despawn();
     }

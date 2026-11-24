@@ -109,6 +109,27 @@ macro_rules! with_document {
     };
 }
 
+/// Most steps that can be undone.
+const MAX_HISTORY: usize = 200;
+
+/// A file's value from before or after a change.
+enum Snapshot {
+    Scene(EffectFile),
+    Emitter(Box<EmitterDef>),
+}
+
+struct Step {
+    path: String,
+    /// Changes of the same group are a single step; see [`Documents::end_group`].
+    group: u64,
+    snapshot: Snapshot,
+}
+
+/// Whether a value was changed. NaNs don't count as different from themselves.
+fn differ<T: PartialEq + std::fmt::Debug>(a: &T, b: &T) -> bool {
+    a != b && format!("{a:?}") != format!("{b:?}")
+}
+
 /// Every open file, by its path in the asset folder.
 #[derive(Resource, Default)]
 pub struct Documents {
@@ -116,6 +137,9 @@ pub struct Documents {
     emitters: BTreeMap<String, Document<EmitterDef>>,
     /// Files whose value changed since [`Self::take_changed`].
     changed: BTreeSet<String>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+    group: u64,
 }
 
 /// The form of a path that [`Documents`] uses, whatever separators the platform has.
@@ -132,6 +156,8 @@ impl Documents {
     pub fn file_loaded(&mut self, path: &str, text: String) -> Result<(), BevyError> {
         match with_document!(self, path, document => document.file_changed(text.clone())) {
             Some(Ok(true)) => {
+                // Undoing past this would undo the other program's change.
+                self.forget_history(path);
                 self.changed.insert(path.into());
             }
             Some(result) => {
@@ -152,28 +178,144 @@ impl Documents {
     }
 
     /// Replaces a file's value with that of `text`, as an unsaved change.
-    #[cfg_attr(not(any(target_arch = "wasm32", test)), expect(dead_code, reason = "web only"))]
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code, reason = "web only"))]
     pub fn replace(&mut self, path: &str, text: &str) -> Result<(), BevyError> {
-        if let Some(document) = self.scenes.get_mut(path) {
-            let old = std::mem::replace(&mut document.value, EffectFile::from_ron(text)?);
+        if self.scenes.contains_key(path) {
+            let file = EffectFile::from_ron(text)?;
             // Refuse what can't be shown.
-            if let Err(error) = self.build(path, |_| Handle::default()) {
-                if let Some(document) = self.scenes.get_mut(path) {
-                    document.value = old;
-                }
-                return Err(error);
-            }
-        } else if let Some(document) = self.emitters.get_mut(path) {
+            self.build_file(path, &file, |_| Handle::default())?;
+            self.edit_scene(path, file);
+        } else if self.emitters.contains_key(path) {
             let def = EmitterDef::from_ron(text)?;
             if let Some(tracks) = &def.tracks {
                 tracks.check(&def.emitter)?;
             }
-            document.value = def;
+            self.edit_emitter(path, def);
         } else {
             return Err(format!("{path} isn't open").into());
         }
-        self.changed.insert(path.into());
+        self.end_group();
         Ok(())
+    }
+
+    pub fn scene(&self, path: &str) -> Option<&EffectFile> {
+        self.scenes.get(path).map(|document| &document.value)
+    }
+
+    pub fn emitter(&self, path: &str) -> Option<&EmitterDef> {
+        self.emitters.get(path).map(|document| &document.value)
+    }
+
+    /// Changes a scene, as something that can be undone.
+    pub fn edit_scene(&mut self, path: &str, file: EffectFile) {
+        if let Some(old) = self.scene(path)
+            && differ(old, &file)
+        {
+            let old = old.clone();
+            self.record(path, Snapshot::Scene(old));
+            self.set(path, Snapshot::Scene(file));
+        }
+    }
+
+    /// Changes an emitter file, as something that can be undone.
+    pub fn edit_emitter(&mut self, path: &str, def: EmitterDef) {
+        if let Some(old) = self.emitter(path)
+            && differ(old, &def)
+        {
+            let old = old.clone();
+            self.record(path, Snapshot::Emitter(Box::new(old)));
+            self.set(path, Snapshot::Emitter(Box::new(def)));
+        }
+    }
+
+    /// Has later changes be undone separately from earlier ones. Until then, changes to the same
+    /// file, such as those of a drag, are one step.
+    pub fn end_group(&mut self) {
+        self.group += 1;
+    }
+
+    fn record(&mut self, path: &str, snapshot: Snapshot) {
+        self.redo.retain(|step| step.path != path);
+        let group = self.group;
+        if self.undo.iter().any(|step| step.group == group && step.path == path) {
+            return;
+        }
+        self.undo.push(Step { path: path.into(), group, snapshot });
+        if self.undo.len() > MAX_HISTORY {
+            self.undo.remove(0);
+        }
+    }
+
+    fn set(&mut self, path: &str, snapshot: Snapshot) {
+        match snapshot {
+            Snapshot::Scene(file) => {
+                if let Some(document) = self.scenes.get_mut(path) {
+                    document.value = file;
+                }
+            }
+            Snapshot::Emitter(def) => {
+                if let Some(document) = self.emitters.get_mut(path) {
+                    document.value = *def;
+                }
+            }
+        }
+        self.changed.insert(path.into());
+    }
+
+    fn snapshot(&self, path: &str) -> Option<Snapshot> {
+        let scene = self.scene(path).cloned().map(Snapshot::Scene);
+        scene.or_else(|| self.emitter(path).cloned().map(|def| Snapshot::Emitter(Box::new(def))))
+    }
+
+    fn forget_history(&mut self, path: &str) {
+        self.undo.retain(|step| step.path != path);
+        self.redo.retain(|step| step.path != path);
+    }
+
+    pub fn can_undo(&self, scene: &str) -> bool {
+        let files = self.files_of(scene);
+        self.undo.iter().any(|step| files.contains(&step.path))
+    }
+
+    pub fn can_redo(&self, scene: &str) -> bool {
+        let files = self.files_of(scene);
+        self.redo.iter().any(|step| files.contains(&step.path))
+    }
+
+    /// Undoes the last step in the files of a scene.
+    pub fn undo(&mut self, scene: &str) {
+        let files = self.files_of(scene);
+        if let Some(index) = self.undo.iter().rposition(|step| files.contains(&step.path)) {
+            let Step { path, group, snapshot } = self.undo.remove(index);
+            if let Some(current) = self.snapshot(&path) {
+                self.redo.push(Step { path: path.clone(), group, snapshot: current });
+            }
+            self.set(&path, snapshot);
+        }
+        self.end_group();
+    }
+
+    pub fn redo(&mut self, scene: &str) {
+        let files = self.files_of(scene);
+        if let Some(index) = self.redo.iter().rposition(|step| files.contains(&step.path)) {
+            let Step { path, group, snapshot } = self.redo.remove(index);
+            if let Some(current) = self.snapshot(&path) {
+                self.undo.push(Step { path: path.clone(), group, snapshot: current });
+            }
+            self.set(&path, snapshot);
+        }
+        self.end_group();
+    }
+
+    /// Every image that the scenes use, as paths from the asset folder.
+    pub fn textures(&self) -> BTreeSet<String> {
+        self.scenes
+            .iter()
+            .filter_map(|(scene, document)| {
+                let texture = document.value.render.texture.as_ref()?;
+                texture_path(scene, &texture.path)
+            })
+            .collect()
     }
 
     /// The emitter files a scene uses.
@@ -227,13 +369,19 @@ impl Documents {
 
     pub fn resolve(&mut self, path: &str, keep_mine: bool) -> Result<(), BevyError> {
         self.changed.insert(path.into());
+        if !keep_mine {
+            self.forget_history(path);
+        }
         with_document!(self, path, document => document.resolve(keep_mine)).unwrap_or(Ok(()))
     }
 
-    /// Drops a file's unsaved changes.
+    /// Drops a file's unsaved changes. Can be undone.
     pub fn revert(&mut self, path: &str) {
-        self.changed.insert(path.into());
-        with_document!(self, path, document => document.value = document.saved.clone());
+        if let Some(file) = self.scenes.get(path).map(|document| document.saved.clone()) {
+            self.edit_scene(path, file);
+        } else if let Some(def) = self.emitters.get(path).map(|document| document.saved.clone()) {
+            self.edit_emitter(path, def);
+        }
     }
 
     /// Whether saving would lose comments, which aren't part of a file's value.
@@ -267,7 +415,16 @@ impl Documents {
         scene: &str,
         image: impl FnMut(AssetPath<'static>) -> Handle<Image>,
     ) -> Result<ParticleEffect, BevyError> {
-        let document = self.scenes.get(scene).ok_or_else(|| format!("{scene} isn't open"))?;
+        let file = self.scene(scene).ok_or_else(|| format!("{scene} isn't open"))?;
+        self.build_file(scene, file, image)
+    }
+
+    fn build_file(
+        &self,
+        scene: &str,
+        file: &EffectFile,
+        image: impl FnMut(AssetPath<'static>) -> Handle<Image>,
+    ) -> Result<ParticleEffect, BevyError> {
         let emitter = |path: &AssetPath<'static>| {
             let path = document_path(path);
             match self.emitters.get(&path) {
@@ -275,8 +432,14 @@ impl Documents {
                 None => Err(format!("{path} isn't open").into()),
             }
         };
-        document.value.build(&AssetPath::parse(scene), emitter, image)
+        file.build(&AssetPath::parse(scene), emitter, image)
     }
+}
+
+/// Where an image is, from the asset folder, if a scene refers to it as `texture`.
+pub fn texture_path(scene: &str, texture: &str) -> Option<String> {
+    let path = AssetPath::parse(scene).resolve_embed_str(texture).ok()?;
+    Some(document_path(&path))
 }
 
 /// Whether there's a comment in some RON.
@@ -395,6 +558,68 @@ mod tests {
         assert!(documents.replace(SCENE, missing).is_err());
         assert_eq!(rate(&documents), 1.0);
         assert!(documents.dirty_files(None).is_empty());
+    }
+
+    #[test]
+    fn a_group_of_changes_is_undone_at_once() {
+        let mut documents = open();
+        let edit = |documents: &mut Documents, rate: f32| {
+            documents.edit_emitter(EMITTER, EmitterDef::from_ron(&emitter(rate)).unwrap());
+        };
+        edit(&mut documents, 2.0);
+        edit(&mut documents, 3.0);
+        documents.end_group();
+        edit(&mut documents, 4.0);
+        edit(&mut documents, 4.0);
+        documents.end_group();
+
+        let mut rates = Vec::new();
+        for _ in 0..3 {
+            documents.undo(SCENE);
+            rates.push(rate(&documents));
+        }
+        assert_eq!(rates, [3.0, 1.0, 1.0]);
+        assert!(!documents.is_dirty(EMITTER) && !documents.can_undo(SCENE));
+        for _ in 0..3 {
+            documents.redo(SCENE);
+            rates.push(rate(&documents));
+        }
+        assert_eq!(rates[3..], [3.0, 4.0, 4.0]);
+
+        documents.undo(SCENE);
+        edit(&mut documents, 9.0);
+        assert!(!documents.can_redo(SCENE));
+        documents.undo(SCENE);
+        assert_eq!(rate(&documents), 3.0);
+    }
+
+    #[test]
+    fn undoing_stays_in_the_files_of_the_scene() {
+        const OTHER: &str = "effects/b.effect.ron";
+        let other = |capacity| format!("(space: (capacity: {capacity}), emitters: [])");
+        let mut documents = open();
+        documents.file_loaded(OTHER, other(8)).unwrap();
+        documents.replace(SCENE, &scene(9)).unwrap();
+        documents.replace(OTHER, &other(7)).unwrap();
+        documents.undo(SCENE);
+        assert!(!documents.is_dirty(SCENE) && documents.is_dirty(OTHER));
+        // Nothing left to undo here.
+        documents.undo(SCENE);
+        assert!(documents.is_dirty(OTHER));
+    }
+
+    #[test]
+    fn reverting_can_be_undone_but_outside_changes_cant() {
+        let mut documents = open();
+        documents.replace(EMITTER, &emitter(5.0)).unwrap();
+        documents.revert(EMITTER);
+        documents.undo(SCENE);
+        assert_eq!(rate(&documents), 5.0);
+        documents.undo(SCENE);
+        documents.file_loaded(EMITTER, emitter(2.0)).unwrap();
+        documents.undo(SCENE);
+        documents.redo(SCENE);
+        assert_eq!(rate(&documents), 2.0);
     }
 
     #[test]

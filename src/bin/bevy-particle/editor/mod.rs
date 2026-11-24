@@ -3,9 +3,11 @@
 
 mod documents;
 mod files;
+mod inspector;
 mod panel;
 mod platform;
 mod theme;
+mod widgets;
 
 use bevy::{
     camera::{visibility::RenderLayers, CameraOutputMode, Viewport},
@@ -51,6 +53,8 @@ struct Editor {
     /// Where the panel was last drawn, in logical pixels; `None` while it's closed.
     panel: Option<egui::Rect>,
     themed: bool,
+    /// What the inspector shows, of the scene at this path.
+    selection: (String, inspector::Selection),
 }
 
 /// The UI has a camera of its own so that bloom and tonemapping leave it alone, and so that it
