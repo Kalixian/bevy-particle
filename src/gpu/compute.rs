@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use bevy::{
     asset::load_embedded_asset,
+    platform::collections::{HashMap, HashSet},
     core_pipeline::schedule::camera_driver,
     prelude::*,
     render::{
@@ -15,13 +16,13 @@ use bevy::{
         },
         diagnostic::RecordDiagnostics,
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
-        storage::GpuShaderBuffer,
+        storage::{GpuShaderBuffer, ShaderBuffer},
         Render, RenderStartup, RenderSystems,
     },
 };
 
 use super::{
-    gravity::{self, GravityBindGroups, GravityBuffers, GravityPipelines},
+    gravity::{self, GravityBindGroups, GravityBuffers, GravityPipelines, GravityPlan},
     GpuSimReady,
 };
 use crate::{
@@ -29,8 +30,7 @@ use crate::{
     modifier::{GpuModifier, ModifierUpload},
     spread::GpuCurve,
     track::GpuTrackRecord,
-    particle::ParticleBuffers,
-    space::SimParams,
+    space::{SimParams, SpaceUpload, SpaceUploads},
 };
 
 /// Must match `@workgroup_size` in the shaders.
@@ -39,12 +39,13 @@ pub(super) const WORKGROUP_SIZE: u32 = 256;
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
         .init_resource::<SimBuffers>()
+        .init_resource::<SpaceGpus>()
         .add_systems(RenderStartup, init_pipelines)
         .add_systems(
             Render,
             (
-                write_sim_buffers.in_set(RenderSystems::PrepareResources),
-                prepare_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                (write_sim_buffers, prepare_spaces).in_set(RenderSystems::PrepareResources),
+                prepare_bind_groups.in_set(RenderSystems::PrepareBindGroups),
             ),
         )
         // Simulate before any camera renders, so every view draws this frame's state.
@@ -61,20 +62,36 @@ struct SimPipelines {
     spawn: CachedComputePipelineId,
 }
 
-/// Small per-frame buffers written from the CPU.
+/// Small per-frame buffers written from the CPU, shared by all spaces.
 #[derive(Resource, Default)]
-pub(super) struct SimBuffers {
-    pub params: UniformBuffer<SimParams>,
+struct SimBuffers {
     emitters: StorageBuffer<Vec<GpuEmitter>>,
     modifiers: StorageBuffer<Vec<GpuModifier>>,
     curves: StorageBuffer<Vec<GpuCurve>>,
     tracks: StorageBuffer<Vec<GpuTrackRecord>>,
+    /// Stands in for the acceleration buffer of spaces without gravity, which never read it.
+    no_accel: StorageBuffer<Vec<Vec2>>,
 }
 
-#[derive(Resource)]
-struct SimBindGroups {
+/// Render-world state of each space, by [`ParticleBuffers::id`].
+///
+/// [`ParticleBuffers::id`]: crate::particle::ParticleBuffers::id
+#[derive(Resource, Default)]
+struct SpaceGpus(HashMap<AssetId<ShaderBuffer>, SpaceGpu>);
+
+#[derive(Default)]
+struct SpaceGpu {
+    params: UniformBuffer<SimParams>,
+    /// `Some` while the space has gravity.
+    gravity: Option<GravityBuffers>,
+    /// `None` until everything they bind is ready.
+    bind_groups: Option<SpaceBindGroups>,
+}
+
+struct SpaceBindGroups {
     sim: BindGroup,
-    compact: BindGroup,
+    /// For `compact`, and for the gravity passes.
+    gravity: Option<(BindGroup, GravityBindGroups)>,
 }
 
 fn init_pipelines(
@@ -144,15 +161,12 @@ fn init_pipelines(
 }
 
 fn write_sim_buffers(
-    params: Res<SimParams>,
     emitters: Res<EmitterUpload>,
     modifiers: Res<ModifierUpload>,
     mut buffers: ResMut<SimBuffers>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
 ) {
-    buffers.params.set(*params);
-    buffers.params.write_buffer(&device, &queue);
     buffers.emitters.set(emitters.emitters.clone());
     buffers.emitters.write_buffer(&device, &queue);
     buffers.modifiers.set(modifiers.gpu_data());
@@ -161,71 +175,147 @@ fn write_sim_buffers(
     buffers.curves.write_buffer(&device, &queue);
     buffers.tracks.set(modifiers.tracks_gpu_data());
     buffers.tracks.write_buffer(&device, &queue);
+    if buffers.no_accel.buffer().is_none() {
+        buffers.no_accel.set(vec![Vec2::ZERO]);
+        buffers.no_accel.write_buffer(&device, &queue);
+    }
 }
 
-fn prepare_bind_group(
-    mut commands: Commands,
+/// Drops the state of removed spaces and updates the buffers of the others.
+fn prepare_spaces(
+    uploads: Res<SpaceUploads>,
+    mut spaces: ResMut<SpaceGpus>,
+    gravity_pipelines: Res<GravityPipelines>,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+) {
+    let current: HashSet<_> = uploads.0.iter().map(|upload| upload.buffers.id()).collect();
+    spaces.0.retain(|id, _| current.contains(id));
+    for SpaceUpload { buffers, params, .. } in &uploads.0 {
+        let space = spaces.0.entry(buffers.id()).or_default();
+        space.params.set(*params);
+        space.params.write_buffer(&device, &queue);
+        GravityBuffers::update(&mut space.gravity, params, &gravity_pipelines, &device, &queue);
+    }
+}
+
+fn prepare_bind_groups(
     pipelines: Res<SimPipelines>,
+    gravity_pipelines: Res<GravityPipelines>,
     pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     sim_buffers: Res<SimBuffers>,
-    particle_buffers: Option<Res<ParticleBuffers>>,
-    gravity_buffers: Option<Res<GravityBuffers>>,
+    uploads: Res<SpaceUploads>,
+    mut spaces: ResMut<SpaceGpus>,
     gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
 ) {
-    let gpu = particle_buffers.and_then(|b| {
-        Some((
-            gpu_buffers.get(&b.particles)?,
-            gpu_buffers.get(&b.free_list)?,
-            gpu_buffers.get(&b.accel)?,
-        ))
-    });
-    let (
-        Some((particles, free_list, accel)),
-        Some(gravity),
-        Some(emitters),
-        Some(modifiers),
-        Some(curves),
-        Some(tracks),
-    ) = (
-        gpu,
-        gravity_buffers,
-        sim_buffers.emitters.binding(),
-        sim_buffers.modifiers.binding(),
-        sim_buffers.curves.binding(),
-        sim_buffers.tracks.binding(),
-    )
-    else {
-        commands.remove_resource::<SimBindGroups>();
-        return;
+    for upload in &uploads.0 {
+        let Some(space) = spaces.0.get_mut(&upload.buffers.id()) else {
+            continue;
+        };
+        space.bind_groups = create_bind_groups(
+            upload,
+            space,
+            &sim_buffers,
+            &pipelines,
+            &gravity_pipelines,
+            &pipeline_cache,
+            &device,
+            &gpu_buffers,
+        );
+    }
+}
+
+fn create_bind_groups(
+    upload: &SpaceUpload,
+    space: &SpaceGpu,
+    sim_buffers: &SimBuffers,
+    pipelines: &SimPipelines,
+    gravity_pipelines: &GravityPipelines,
+    pipeline_cache: &PipelineCache,
+    device: &RenderDevice,
+    gpu_buffers: &RenderAssets<GpuShaderBuffer>,
+) -> Option<SpaceBindGroups> {
+    let particles = gpu_buffers.get(&upload.buffers.particles)?;
+    let free_list = gpu_buffers.get(&upload.buffers.free_list)?;
+    let emitters = sim_buffers.emitters.binding()?;
+    let accel = match &space.gravity {
+        Some(gravity) => gravity.accel.as_entire_binding(),
+        None => sim_buffers.no_accel.binding()?,
     };
 
     let sim = device.create_bind_group(
         "particle_sim_bind_group",
         &pipeline_cache.get_bind_group_layout(&pipelines.layout),
         &BindGroupEntries::with_indices((
-            (0, &sim_buffers.params),
+            (0, space.params.binding()?),
             (1, particles.buffer.as_entire_binding()),
             (2, free_list.buffer.as_entire_binding()),
             (3, emitters.clone()),
-            (4, modifiers),
-            (7, accel.buffer.as_entire_binding()),
-            (8, curves),
-            (9, tracks),
+            (4, sim_buffers.modifiers.binding()?),
+            (7, accel),
+            (8, sim_buffers.curves.binding()?),
+            (9, sim_buffers.tracks.binding()?),
         )),
     );
-    let compact = device.create_bind_group(
-        "particle_compact_bind_group",
-        &pipeline_cache.get_bind_group_layout(&pipelines.compact_layout),
-        &BindGroupEntries::with_indices((
-            (0, &sim_buffers.params),
-            (1, particles.buffer.as_entire_binding()),
-            (3, emitters),
-            (5, gravity.bodies.as_entire_binding()),
-            (6, gravity.body_count.as_entire_binding()),
-        )),
-    );
-    commands.insert_resource(SimBindGroups { sim, compact });
+    let gravity = match &space.gravity {
+        Some(gravity) => {
+            let compact = device.create_bind_group(
+                "particle_compact_bind_group",
+                &pipeline_cache.get_bind_group_layout(&pipelines.compact_layout),
+                &BindGroupEntries::with_indices((
+                    (0, space.params.binding()?),
+                    (1, particles.buffer.as_entire_binding()),
+                    (3, emitters),
+                    (5, gravity.bodies.as_entire_binding()),
+                    (6, gravity.body_count.as_entire_binding()),
+                )),
+            );
+            let bind_groups = GravityBindGroups::new(
+                &space.params,
+                gravity,
+                gravity_pipelines,
+                pipeline_cache,
+                device,
+            )?;
+            Some((compact, bind_groups))
+        }
+        None => None,
+    };
+    Some(SpaceBindGroups { sim, gravity })
+}
+
+/// One space's passes this frame.
+struct SpacePlan<'a> {
+    params: &'a SimParams,
+    sim: &'a BindGroup,
+    gravity: Option<SpaceGravityPlan<'a>>,
+}
+
+struct SpaceGravityPlan<'a> {
+    compact: &'a ComputePipeline,
+    compact_bind_group: &'a BindGroup,
+    gravity: GravityPlan<'a>,
+}
+
+fn plan_space<'a>(
+    upload: &'a SpaceUpload,
+    space: &'a SpaceGpu,
+    pipelines: &SimPipelines,
+    gravity_pipelines: &GravityPipelines,
+    cache: &'a PipelineCache,
+) -> Option<SpacePlan<'a>> {
+    let bind_groups = space.bind_groups.as_ref()?;
+    let gravity = match (&space.gravity, &bind_groups.gravity) {
+        // Wait for this space's gravity pipelines too (Barnes-Hut compiles nine of them).
+        (Some(buffers), Some((compact_bind_group, bind_groups))) => Some(SpaceGravityPlan {
+            compact: cache.get_compute_pipeline(pipelines.compact)?,
+            compact_bind_group: compact_bind_group,
+            gravity: gravity_pipelines.plan(cache, buffers, bind_groups)?,
+        }),
+        _ => None,
+    };
+    Some(SpacePlan { params: &upload.params, sim: &bind_groups.sim, gravity })
 }
 
 fn dispatch_sim(
@@ -233,56 +323,43 @@ fn dispatch_sim(
     pipelines: Res<SimPipelines>,
     gravity_pipelines: Res<GravityPipelines>,
     pipeline_cache: Res<PipelineCache>,
-    bind_groups: Option<Res<SimBindGroups>>,
-    gravity_bind_groups: Option<Res<GravityBindGroups>>,
-    gravity_buffers: Option<Res<GravityBuffers>>,
-    params: Res<SimParams>,
-    particle_buffers: Option<Res<ParticleBuffers>>,
+    uploads: Res<SpaceUploads>,
+    spaces: Res<SpaceGpus>,
     ready: Res<GpuSimReady>,
 ) {
-    let (
-        Some(bind_groups),
-        Some(gravity_bind_groups),
-        Some(gravity_buffers),
-        Some(particle_buffers),
-        Some(compact),
-        Some(integrate),
-        Some(spawn),
-    ) = (
-        bind_groups,
-        gravity_bind_groups,
-        gravity_buffers,
-        particle_buffers,
-        pipeline_cache.get_compute_pipeline(pipelines.compact),
-        pipeline_cache.get_compute_pipeline(pipelines.integrate),
-        pipeline_cache.get_compute_pipeline(pipelines.spawn),
-    )
-    else {
+    let mut simulated = HashSet::default();
+    let mut plans = Vec::new();
+    let sim_pipelines = pipeline_cache
+        .get_compute_pipeline(pipelines.integrate)
+        .zip(pipeline_cache.get_compute_pipeline(pipelines.spawn));
+    if sim_pipelines.is_some() {
+        for upload in &uploads.0 {
+            let id = upload.buffers.id();
+            let plan = spaces.0.get(&id).and_then(|space| {
+                plan_space(upload, space, &pipelines, &gravity_pipelines, &pipeline_cache)
+            });
+            if let Some(plan) = plan {
+                simulated.insert(id);
+                plans.push(plan);
+            }
+        }
+    }
+    ready.set(simulated);
+    let Some((integrate, spawn)) = sim_pipelines else {
         return;
     };
-    if params.capacity == 0 {
+    if plans.is_empty() {
         return;
     }
-    // Wait for this frame's gravity pipelines too (Barnes-Hut compiles nine of them).
-    let gravity_plan = if params.gravity_enabled != 0 {
-        let Some(plan) = gravity_pipelines.plan(&pipeline_cache, &params, &gravity_bind_groups)
-        else {
-            return;
-        };
-        Some(plan)
-    } else {
-        None
-    };
 
-    let slot_groups = params.capacity.div_ceil(WORKGROUP_SIZE);
     // GPU timing spans ("render/particles/..."); no-ops unless RenderDiagnosticsPlugin is
-    // added (the `profile` feature).
+    // added (the `profile` feature). With several spaces, each records its own.
     let recorder = ctx.diagnostic_recorder();
     let diagnostics = recorder.as_deref();
 
     let encoder = ctx.command_encoder();
-    if let Some(plan) = &gravity_plan {
-        gravity::clear_buffers(encoder, plan, &gravity_buffers);
+    for gravity in plans.iter().filter_map(|plan| plan.gravity.as_ref()) {
+        gravity::clear_buffers(encoder, &gravity.gravity);
     }
 
     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -292,33 +369,34 @@ fn dispatch_sim(
     let total_span = diagnostics.time_span(&mut pass, "particles");
     // Each dispatch is its own synchronization scope, so every pass sees the writes of the
     // passes before it.
+    for SpacePlan { params, sim, gravity } in &plans {
+        let slot_groups = params.capacity.div_ceil(WORKGROUP_SIZE);
 
-    if let Some(plan) = &gravity_plan {
-        let span = diagnostics.time_span(&mut pass, "compact");
-        pass.set_bind_group(0, &bind_groups.compact, &[]);
-        pass.set_pipeline(compact);
+        if let Some(plan) = gravity {
+            let span = diagnostics.time_span(&mut pass, "compact");
+            pass.set_bind_group(0, plan.compact_bind_group, &[]);
+            pass.set_pipeline(plan.compact);
+            pass.dispatch_workgroups(slot_groups, 1, 1);
+            span.end(&mut pass);
+
+            gravity::dispatch(&mut pass, &plan.gravity, diagnostics);
+        }
+
+        pass.set_bind_group(0, *sim, &[]);
+
+        // Integrate before spawn: it ages and kills particles, returning their slots to the
+        // free list, so the spawn pass can reuse them in the same frame.
+        let span = diagnostics.time_span(&mut pass, "integrate");
+        pass.set_pipeline(integrate);
         pass.dispatch_workgroups(slot_groups, 1, 1);
         span.end(&mut pass);
 
-        gravity::dispatch(&mut pass, plan, &gravity_bind_groups, &gravity_buffers, diagnostics);
+        if params.spawn_total > 0 {
+            let span = diagnostics.time_span(&mut pass, "spawn");
+            pass.set_pipeline(spawn);
+            pass.dispatch_workgroups(params.spawn_total.div_ceil(WORKGROUP_SIZE), 1, 1);
+            span.end(&mut pass);
+        }
     }
-
-    pass.set_bind_group(0, &bind_groups.sim, &[]);
-
-    // Integrate before spawn: it ages and kills particles, returning their slots to the
-    // free list, so the spawn pass can reuse them in the same frame.
-    let span = diagnostics.time_span(&mut pass, "integrate");
-    pass.set_pipeline(integrate);
-    pass.dispatch_workgroups(slot_groups, 1, 1);
-    span.end(&mut pass);
-
-    if params.spawn_total > 0 {
-        let span = diagnostics.time_span(&mut pass, "spawn");
-        pass.set_pipeline(spawn);
-        pass.dispatch_workgroups(params.spawn_total.div_ceil(WORKGROUP_SIZE), 1, 1);
-        span.end(&mut pass);
-    }
-
     total_span.end(&mut pass);
-    ready.set(particle_buffers.space);
 }

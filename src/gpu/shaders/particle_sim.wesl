@@ -272,12 +272,13 @@ fn apply_appearance(p: ptr<function, Particle>, modifier: Modifier) {
 
 @compute @workgroup_size(256)
 fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
-    let request = id.x;
-    if request >= params.spawn_total {
+    if id.x >= params.spawn_total {
         return;
     }
+    let request = params.spawn_first + id.x;
 
-    // Find the emitter that owns this request. Linear scan: fine for a handful of emitters.
+    // Find the emitter that owns this request (the array has every space's emitters, but
+    // request numbers are unique). Linear scan: fine for a handful of emitters.
     var e = 0u;
     for (var k = 0u; k < params.emitter_count; k++) {
         let em = emitters[k];

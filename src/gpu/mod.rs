@@ -7,20 +7,18 @@ mod gravity;
 #[cfg(test)]
 mod shader_tests;
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::{Arc, Mutex};
 
 use bevy::{
     asset::embedded_asset,
+    platform::collections::HashSet,
     prelude::*,
-    render::{extract_resource::ExtractResourcePlugin, Extract, ExtractSchedule, RenderApp},
+    render::{extract_resource::ExtractResourcePlugin, storage::ShaderBuffer, RenderApp},
     shader::load_shader_library,
 };
 
 use crate::{
-    emitter::EmitterUpload, modifier::ModifierUpload, particle::ParticleBuffers, space::SimParams,
+    emitter::EmitterUpload, modifier::ModifierUpload, space::SpaceUploads,
 };
 
 pub struct ParticleGpuPlugin;
@@ -39,8 +37,7 @@ impl Plugin for ParticleGpuPlugin {
         embedded_asset!(app, "shaders/gravity_bh.wesl");
 
         app.add_plugins((
-            ExtractResourcePlugin::<ParticleBuffers>::default(),
-            ExtractResourcePlugin::<SimParams>::default(),
+            ExtractResourcePlugin::<SpaceUploads>::default(),
             ExtractResourcePlugin::<EmitterUpload>::default(),
             ExtractResourcePlugin::<ModifierUpload>::default(),
         ));
@@ -52,49 +49,27 @@ impl Plugin for ParticleGpuPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app
-            .insert_resource(ready)
-            .add_systems(ExtractSchedule, extract_buffer_removal);
+        render_app.insert_resource(ready);
         gravity::build(render_app);
         compute::build(render_app);
         draw::build(render_app);
     }
 }
 
-/// `ExtractResourcePlugin` copies resources over but never removes them, so without this a
-/// removed space's buffers would keep being simulated and drawn.
-fn extract_buffer_removal(
-    mut commands: Commands,
-    main_buffers: Extract<Option<Res<ParticleBuffers>>>,
-    render_buffers: Option<Res<ParticleBuffers>>,
-) {
-    if main_buffers.is_none() && render_buffers.is_some() {
-        commands.remove_resource::<ParticleBuffers>();
-    }
-}
-
-/// The space whose buffers the simulation compute passes last ran with. Emitters hold their
-/// spawns until it's theirs, so nothing is requested before the GPU can act on it.
+/// The particle buffers simulated in the last rendered frame. Emitters hold their spawns
+/// until their space's are among them, so nothing is requested before the GPU can act on it.
 ///
-/// It names the space, rather than being a flag reset for each new one, because rendering is
-/// pipelined: the render world may still be finishing a frame of the previous space when the
-/// main world creates the next.
-#[derive(Resource, Clone)]
-pub struct GpuSimReady(Arc<AtomicU64>);
-
-impl Default for GpuSimReady {
-    fn default() -> Self {
-        Self(Arc::new(AtomicU64::new(Entity::PLACEHOLDER.to_bits())))
-    }
-}
+/// Buffers, rather than space entities, because rendering is pipelined: the render world may
+/// still be finishing a frame of a space's previous buffers.
+#[derive(Resource, Clone, Default)]
+pub struct GpuSimReady(Arc<Mutex<HashSet<AssetId<ShaderBuffer>>>>);
 
 impl GpuSimReady {
-    /// Whether `space` has been simulated with its current buffers.
-    pub fn is_simulating(&self, space: Entity) -> bool {
-        self.0.load(Ordering::Relaxed) == space.to_bits()
+    pub fn is_simulating(&self, buffers: AssetId<ShaderBuffer>) -> bool {
+        self.0.lock().unwrap().contains(&buffers)
     }
 
-    fn set(&self, space: Entity) {
-        self.0.store(space.to_bits(), Ordering::Relaxed);
+    pub(crate) fn set(&self, simulated: HashSet<AssetId<ShaderBuffer>>) {
+        *self.0.lock().unwrap() = simulated;
     }
 }

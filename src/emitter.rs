@@ -1,4 +1,5 @@
 use bevy::{
+    ecs::entity::EntityHashMap,
     prelude::*,
     render::{extract_resource::ExtractResource, render_resource::ShaderType},
 };
@@ -8,6 +9,7 @@ use crate::{
     gpu::GpuSimReady,
     modifier::{ModifierSystems, ModifierUpload, Modifiers, TargetAttractor},
     particle::ParticleBuffers,
+    space::ParticleSpace,
     spread::{GpuCurve, Spread, NO_CURVE},
 };
 
@@ -35,7 +37,10 @@ impl Plugin for EmitterPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EmitterSystems;
 
-/// Spawn settings for a set of particles. Spawn it as a child of a `ParticleSpace`.
+/// Spawn settings for a set of particles. It spawns into the nearest [`ParticleSpace`] among
+/// its ancestors, so make it a child (or grandchild) of one; without one it does nothing.
+///
+/// Moving an emitter to another space only affects new particles; existing ones stay behind.
 ///
 /// Spawning happens on the GPU: each frame the CPU only sends how many particles each
 /// emitter wants; the GPU picks free slots and rolls the random initial values.
@@ -102,6 +107,7 @@ pub struct EmitterState {
     burst_done: bool,
     /// Seconds since the emitter started, for `Track::over_time`.
     age: f32,
+    warned_no_space: bool,
 }
 
 /// Emitter references have 16 bits for the slot.
@@ -166,8 +172,8 @@ pub struct GpuEmitter {
     pub blue: Vec2,
     pub alpha: Vec2,
     pub mass_per_radius: f32,
-    /// This emitter's spawn requests are spawn-pass threads
-    /// `spawn_offset .. spawn_offset + spawn_count`.
+    /// This emitter's spawn requests are `spawn_offset .. spawn_offset + spawn_count`,
+    /// numbered across all spaces.
     pub spawn_offset: u32,
     pub spawn_count: u32,
     /// 0 for despawned emitters; their particles are killed.
@@ -189,7 +195,7 @@ pub struct GpuEmitter {
     pub alpha_curve: u32,
 }
 
-/// This frame's emitter array and spawn requests, sent to the render world.
+/// This frame's emitter array (shared by all spaces), sent to the render world.
 #[derive(Resource, Clone, Default, ExtractResource)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct EmitterUpload {
@@ -198,8 +204,42 @@ pub struct EmitterUpload {
     pub emitters: Vec<GpuEmitter>,
     /// Lookup tables for the emitters' non-uniform `Spread`s.
     curves: Vec<GpuCurve>,
-    /// Sum of all `spawn_count`s: the number of spawn-pass threads.
-    pub spawn_total: u32,
+    /// Each space's spawn requests. Spaces without any are left out.
+    pub spawn_ranges: EntityHashMap<SpawnRange>,
+}
+
+/// A space's spawn requests: `first .. first + count`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpawnRange {
+    pub first: u32,
+    pub count: u32,
+}
+
+/// Numbers the spawn requests so that each space's are contiguous. `spaces` holds the space
+/// each emitter spawns into.
+fn assign_spawn_ranges(
+    emitters: &mut [GpuEmitter],
+    spaces: &[Option<Entity>],
+) -> EntityHashMap<SpawnRange> {
+    let mut ranges = EntityHashMap::<SpawnRange>::default();
+    for (emitter, space) in emitters.iter().zip(spaces) {
+        if let Some(space) = space && emitter.spawn_count > 0 {
+            ranges.entry(*space).or_default().count += emitter.spawn_count;
+        }
+    }
+    let mut first = 0;
+    for range in ranges.values_mut() {
+        range.first = first;
+        first += range.count;
+    }
+    let mut next: EntityHashMap<u32> = ranges.iter().map(|(e, r)| (*e, r.first)).collect();
+    for (emitter, space) in emitters.iter_mut().zip(spaces) {
+        if let Some(next) = space.and_then(|space| next.get_mut(&space)) {
+            emitter.spawn_offset = *next;
+            *next += emitter.spawn_count;
+        }
+    }
+    ranges
 }
 
 impl EmitterUpload {
@@ -233,7 +273,9 @@ fn prepare_emitter_upload(
     time: Res<Time>,
     registry: Res<EmitterRegistry>,
     sim_ready: Res<GpuSimReady>,
-    particle_buffers: Option<Res<ParticleBuffers>>,
+    spaces: Query<&ParticleBuffers, With<ParticleSpace>>,
+    is_space: Query<(), With<ParticleSpace>>,
+    parents: Query<&ChildOf>,
     mut emitters: Query<(
         &ParticleEmitter,
         &mut EmitterState,
@@ -244,21 +286,31 @@ fn prepare_emitter_upload(
     mut upload: ResMut<EmitterUpload>,
     mut modifier_upload: ResMut<ModifierUpload>,
 ) {
-    // Hold spawns (bursts included) until the GPU is actually simulating this space. Before
-    // that (pipelines compiling, buffers not created yet) they'd be lost.
-    let can_burst = particle_buffers.is_some_and(|b| sim_ready.is_simulating(b.space));
-    let dt = if can_burst { time.delta_secs() } else { 0.0 };
-    let mut spawn_total = 0u32;
+    let mut emitter_spaces = Vec::with_capacity(registry.slots.len());
 
     upload.emitters.clear();
     upload.curves.clear();
     for slot in &registry.slots {
-        let Some((emitter, mut state, transform, modifiers, attractor)) =
-            slot.entity.and_then(|e| emitters.get_mut(e).ok())
+        let Some((entity, (emitter, mut state, transform, modifiers, attractor))) =
+            slot.entity.and_then(|e| Some((e, emitters.get_mut(e).ok()?)))
         else {
             upload.emitters.push(GpuEmitter::default());
+            emitter_spaces.push(None);
             continue;
         };
+
+        let space = parents.iter_ancestors(entity).find(|e| is_space.contains(*e));
+        if space.is_none() && !state.warned_no_space {
+            warn!("Emitter {entity} has no ParticleSpace among its ancestors");
+            state.warned_no_space = true;
+        }
+        emitter_spaces.push(space);
+        // Hold spawns (bursts included) until the GPU is actually simulating the space. Before
+        // that (pipelines compiling, buffers not created yet) they'd be lost.
+        let can_burst = space
+            .and_then(|space| spaces.get(space).ok())
+            .is_some_and(|buffers| sim_ready.is_simulating(buffers.id()));
+        let dt = if can_burst { time.delta_secs() } else { 0.0 };
 
         state.accumulator += emitter.rate.max(0.0) * dt;
         let mut spawn_count = state.accumulator as u32;
@@ -298,7 +350,8 @@ fn prepare_emitter_upload(
             blue,
             alpha,
             mass_per_radius: emitter.mass_per_radius,
-            spawn_offset: spawn_total,
+            // Set by `assign_spawn_ranges`.
+            spawn_offset: 0,
             spawn_count,
             enabled: 1,
             generation: slot.generation.into(),
@@ -314,13 +367,13 @@ fn prepare_emitter_upload(
             blue_curve,
             alpha_curve,
         });
-        spawn_total += spawn_count;
     }
 
+    let upload = &mut *upload;
+    upload.spawn_ranges = assign_spawn_ranges(&mut upload.emitters, &emitter_spaces);
     if upload.emitters.is_empty() {
         upload.emitters.push(GpuEmitter::default());
     }
-    upload.spawn_total = spawn_total;
 }
 
 #[cfg(test)]
@@ -345,6 +398,27 @@ mod tests {
         assert!(registry.register(a));
         let first = &registry.slots[0];
         assert_eq!((first.entity, first.generation), (Some(a), 2));
+    }
+
+    #[test]
+    fn spawn_requests_are_contiguous_per_space() {
+        let mut world = World::new();
+        let [a, b, idle] = std::array::from_fn(|_| world.spawn_empty().id());
+        let mut emitters = [3, 5, 2, 0, 7].map(|spawn_count| GpuEmitter {
+            spawn_count,
+            ..default()
+        });
+        let spaces = [Some(a), Some(b), Some(a), Some(idle), Some(b)];
+        let ranges = assign_spawn_ranges(&mut emitters, &spaces);
+
+        assert_eq!((ranges[&a].count, ranges[&b].count, ranges.len()), (5, 12, 2));
+        let mut firsts = [(ranges[&a].first, 5), (ranges[&b].first, 12)];
+        firsts.sort();
+        assert_eq!((firsts[0].0, firsts[1].0), (0, firsts[0].1));
+        // Within a space, emitters follow each other.
+        let offset = |i: usize| emitters[i].spawn_offset;
+        assert_eq!((offset(0), offset(2)), (ranges[&a].first, ranges[&a].first + 3));
+        assert_eq!((offset(1), offset(4)), (ranges[&b].first, ranges[&b].first + 5));
     }
 
     #[test]

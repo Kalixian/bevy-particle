@@ -21,6 +21,8 @@ struct Particle {
 struct SimParams {
     dt: f32,
     capacity: u32,
+    // The space's spawn requests are numbered from `spawn_first`.
+    spawn_first: u32,
     spawn_total: u32,
     emitter_count: u32,
     frame: u32,

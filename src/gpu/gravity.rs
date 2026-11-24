@@ -1,6 +1,6 @@
 //! N-body gravity between particles.
 //!
-//! Each frame, when the space has `Gravity`:
+//! Each frame, for every space with `Gravity`:
 //! 1. `compact` (in `particle_sim.wesl`) packs every live particle whose emitter has
 //!    `gravity: true` into `bodies` as `(x, y, mass, slot)` and counts them in `body_count`.
 //! 2. One of:
@@ -17,20 +17,17 @@ use bevy::{
     asset::load_embedded_asset,
     prelude::*,
     render::{
-        render_asset::RenderAssets,
         render_resource::{
             binding_types::{storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer},
             *,
         },
         diagnostic::{DiagnosticsRecorder, RecordDiagnostics},
         renderer::{RenderDevice, RenderQueue},
-        storage::GpuShaderBuffer,
-        Render, RenderStartup, RenderSystems,
+        RenderStartup,
     },
 };
 
-use super::compute::SimBuffers;
-use crate::{particle::ParticleBuffers, space::SimParams};
+use crate::{gravity::GravityMethod, space::SimParams};
 
 pub(super) const WORKGROUP_SIZE: u32 = 256;
 /// Most storage buffers any Barnes-Hut layout binds (WebGPU's default limit per stage).
@@ -40,15 +37,7 @@ const RADIX_PASSES: usize = 8;
 pub(super) const FORCE_WORKGROUP_SIZE: u32 = 256;
 
 pub(super) fn build(render_app: &mut SubApp) {
-    render_app
-        .add_systems(RenderStartup, init_pipelines)
-        .add_systems(
-            Render,
-            (
-                prepare_gravity_buffers.in_set(RenderSystems::PrepareResources),
-                prepare_bind_groups.in_set(RenderSystems::PrepareBindGroups),
-            ),
-        );
+    render_app.add_systems(RenderStartup, init_pipelines);
 }
 
 /// Must match `struct RadixPass` in `gravity_bh.wesl`.
@@ -59,14 +48,21 @@ pub(super) struct RadixPassParams {
     dst: u32,
 }
 
-/// GPU-only working buffers, sized from the maximum body count `M`.
-#[derive(Resource)]
+/// One space's GPU-only working buffers, sized from its maximum body count `M`. They exist
+/// only while the space has `Gravity`.
 pub(super) struct GravityBuffers {
     /// `M` × `vec4<f32>`: (x, y, mass, bitcast slot index).
     pub bodies: Buffer,
     /// One `u32`: how many `bodies` were written this frame. Reset to 0 every frame.
     pub body_count: Buffer,
-    // Barnes-Hut only:
+    /// `capacity` × `vec2<f32>`: acceleration per particle slot, read by `integrate`.
+    pub accel: Buffer,
+    /// Only while the space uses Barnes-Hut.
+    barnes_hut: Option<BarnesHutBuffers>,
+    max_bodies: u32,
+}
+
+pub(super) struct BarnesHutBuffers {
     bounds: Buffer,
     keys: Buffer,
     vals: Buffer,
@@ -79,7 +75,85 @@ pub(super) struct GravityBuffers {
     sorted_bodies: Buffer,
     radix_params: DynamicUniformBuffer<RadixPassParams>,
     radix_offsets: [u32; RADIX_PASSES],
-    max_bodies: u32,
+}
+
+fn create_buffer(device: &RenderDevice, label: &'static str, size: u64) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size: size.max(16),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+impl GravityBuffers {
+    /// Keeps `buffers` in step with a space's settings: creates what they need and drops what
+    /// they don't.
+    pub fn update(
+        buffers: &mut Option<Self>,
+        params: &SimParams,
+        pipelines: &GravityPipelines,
+        device: &RenderDevice,
+        queue: &RenderQueue,
+    ) {
+        if !params.uses_gravity() {
+            *buffers = None;
+            return;
+        }
+        let max_bodies = params.gravity_max_bodies;
+        let m = max_bodies as u64;
+        let buffers = buffers.get_or_insert_with(|| Self {
+            bodies: create_buffer(device, "gravity_bodies", m * 16),
+            body_count: create_buffer(device, "gravity_body_count", 4),
+            accel: create_buffer(device, "gravity_accel", params.capacity as u64 * 8),
+            barnes_hut: None,
+            max_bodies,
+        });
+        // Queue writes land before this frame's command buffers, so `compact` starts from 0.
+        queue.write_buffer(&buffers.body_count, 0, &0u32.to_le_bytes());
+
+        if !pipelines.uses_barnes_hut(params) {
+            buffers.barnes_hut = None;
+        } else if buffers.barnes_hut.is_none() {
+            buffers.barnes_hut = Some(BarnesHutBuffers::new(max_bodies, device, queue));
+        }
+    }
+}
+
+impl BarnesHutBuffers {
+    fn new(max_bodies: u32, device: &RenderDevice, queue: &RenderQueue) -> Self {
+        let create = |label, size| create_buffer(device, label, size);
+        let m = max_bodies as u64;
+        let tiles = m.div_ceil(WORKGROUP_SIZE as u64);
+
+        // Radix pass p sorts bits 4p..4p+4, from one half of keys/vals into the other.
+        let mut radix_params = DynamicUniformBuffer::default();
+        let radix_offsets = std::array::from_fn(|p| {
+            let (src, dst) = if p % 2 == 0 { (0, max_bodies) } else { (max_bodies, 0) };
+            radix_params.push(&RadixPassParams {
+                shift: 4 * p as u32,
+                src,
+                dst,
+            })
+        });
+        radix_params.write_buffer(device, queue);
+
+        Self {
+            bounds: create("gravity_bounds", 16),
+            keys: create("gravity_keys", 2 * m * 4),
+            vals: create("gravity_vals", 2 * m * 4),
+            // 16 digits × tiles, plus one sum per 256-entry block (at most 256).
+            hist: create("gravity_hist", (16 * tiles + 256) * 4),
+            nodes: create("gravity_nodes", m * 16),
+            leaf_parent: create("gravity_leaf_parent", m * 4),
+            node_data: create("gravity_node_data", 3 * m * 4),
+            visits: create("gravity_visits", m * 4),
+            packed_nodes: create("gravity_packed_nodes", m * 16),
+            sorted_bodies: create("gravity_sorted_bodies", m * 16),
+            radix_params,
+            radix_offsets,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -107,13 +181,13 @@ struct BarnesHutPipelines {
     force: CachedComputePipelineId,
 }
 
-#[derive(Resource)]
-pub(super) struct GravityBindGroups {
-    brute: BindGroup,
-    barnes_hut: Option<BarnesHutBindGroups>,
+/// For the method the space uses.
+pub(super) enum GravityBindGroups {
+    BruteForce(BindGroup),
+    BarnesHut(BarnesHutBindGroups),
 }
 
-struct BarnesHutBindGroups {
+pub(super) struct BarnesHutBindGroups {
     sort: BindGroup,
     build: BindGroup,
     walk: BindGroup,
@@ -246,152 +320,87 @@ fn queue_barnes_hut(asset_server: &AssetServer, pipeline_cache: &PipelineCache) 
     }
 }
 
-fn prepare_gravity_buffers(
-    mut commands: Commands,
-    params: Res<SimParams>,
-    existing: Option<Res<GravityBuffers>>,
-    device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-) {
-    let max_bodies = params.gravity_max_bodies;
-    if max_bodies == 0 {
-        return;
+impl GravityBindGroups {
+    /// `None` if the buffers aren't ready.
+    pub fn new(
+        params: &UniformBuffer<SimParams>,
+        buffers: &GravityBuffers,
+        pipelines: &GravityPipelines,
+        cache: &PipelineCache,
+        device: &RenderDevice,
+    ) -> Option<Self> {
+        let params = params.binding()?;
+        let accel = buffers.accel.as_entire_binding();
+        let (Some(bh), Some(work)) = (&pipelines.barnes_hut, &buffers.barnes_hut) else {
+            return Some(Self::BruteForce(device.create_bind_group(
+                "gravity_brute_bind_group",
+                &cache.get_bind_group_layout(&pipelines.brute_layout),
+                &BindGroupEntries::sequential((
+                    params,
+                    buffers.bodies.as_entire_binding(),
+                    buffers.body_count.as_entire_binding(),
+                    accel,
+                )),
+            )));
+        };
+        Some(Self::BarnesHut(BarnesHutBindGroups {
+            sort: device.create_bind_group(
+                "gravity_bh_sort_bind_group",
+                &cache.get_bind_group_layout(&bh.sort_layout),
+                &BindGroupEntries::with_indices((
+                    (0, params.clone()),
+                    (1, work.radix_params.binding()?),
+                    (2, buffers.bodies.as_entire_binding()),
+                    (3, buffers.body_count.as_entire_binding()),
+                    (5, work.bounds.as_entire_binding()),
+                    (6, work.keys.as_entire_binding()),
+                    (7, work.vals.as_entire_binding()),
+                    (8, work.hist.as_entire_binding()),
+                )),
+            ),
+            build: device.create_bind_group(
+                "gravity_bh_build_bind_group",
+                &cache.get_bind_group_layout(&bh.build_layout),
+                &BindGroupEntries::with_indices((
+                    (0, params.clone()),
+                    (2, buffers.bodies.as_entire_binding()),
+                    (3, buffers.body_count.as_entire_binding()),
+                    (5, work.bounds.as_entire_binding()),
+                    (6, work.keys.as_entire_binding()),
+                    (7, work.vals.as_entire_binding()),
+                    (9, work.nodes.as_entire_binding()),
+                    (10, work.leaf_parent.as_entire_binding()),
+                    (14, work.sorted_bodies.as_entire_binding()),
+                )),
+            ),
+            walk: device.create_bind_group(
+                "gravity_bh_walk_bind_group",
+                &cache.get_bind_group_layout(&bh.walk_layout),
+                &BindGroupEntries::with_indices((
+                    (0, params),
+                    (3, buffers.body_count.as_entire_binding()),
+                    (4, accel),
+                    (9, work.nodes.as_entire_binding()),
+                    (10, work.leaf_parent.as_entire_binding()),
+                    (11, work.node_data.as_entire_binding()),
+                    (12, work.visits.as_entire_binding()),
+                    (13, work.packed_nodes.as_entire_binding()),
+                    (14, work.sorted_bodies.as_entire_binding()),
+                )),
+            ),
+        }))
     }
-
-    if let Some(buffers) = existing.filter(|b| b.max_bodies == max_bodies) {
-        // Queue writes land before this frame's command buffers, so `compact` starts from 0.
-        queue.write_buffer(&buffers.body_count, 0, &0u32.to_le_bytes());
-        return;
-    }
-
-    // New buffers are zeroed by wgpu, so the count already starts at 0.
-    let create = |label: &'static str, size: u64| {
-        device.create_buffer(&BufferDescriptor {
-            label: Some(label),
-            size: size.max(16),
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        })
-    };
-    let m = max_bodies as u64;
-    let tiles = m.div_ceil(WORKGROUP_SIZE as u64);
-
-    // Radix pass p sorts bits 4p..4p+4, from one half of keys/vals into the other.
-    let mut radix_params = DynamicUniformBuffer::default();
-    let radix_offsets = std::array::from_fn(|p| {
-        let (src, dst) = if p % 2 == 0 { (0, max_bodies) } else { (max_bodies, 0) };
-        radix_params.push(&RadixPassParams {
-            shift: 4 * p as u32,
-            src,
-            dst,
-        })
-    });
-    radix_params.write_buffer(&device, &queue);
-
-    commands.insert_resource(GravityBuffers {
-        bodies: create("gravity_bodies", m * 16),
-        body_count: create("gravity_body_count", 4),
-        bounds: create("gravity_bounds", 16),
-        keys: create("gravity_keys", 2 * m * 4),
-        vals: create("gravity_vals", 2 * m * 4),
-        // 16 digits × tiles, plus one sum per 256-entry block (at most 256).
-        hist: create("gravity_hist", (16 * tiles + 256) * 4),
-        nodes: create("gravity_nodes", m * 16),
-        leaf_parent: create("gravity_leaf_parent", m * 4),
-        node_data: create("gravity_node_data", 3 * m * 4),
-        visits: create("gravity_visits", m * 4),
-        packed_nodes: create("gravity_packed_nodes", m * 16),
-        sorted_bodies: create("gravity_sorted_bodies", m * 16),
-        radix_params,
-        radix_offsets,
-        max_bodies,
-    });
 }
 
-fn prepare_bind_groups(
-    mut commands: Commands,
-    pipelines: Res<GravityPipelines>,
-    pipeline_cache: Res<PipelineCache>,
-    device: Res<RenderDevice>,
-    sim_buffers: Res<SimBuffers>,
-    buffers: Option<Res<GravityBuffers>>,
-    particle_buffers: Option<Res<ParticleBuffers>>,
-    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
-) {
-    let accel = particle_buffers.and_then(|b| gpu_buffers.get(&b.accel));
-    let (Some(buffers), Some(accel), Some(radix_params)) = (
-        buffers.as_deref(),
-        accel,
-        buffers.as_ref().and_then(|b| b.radix_params.binding()),
-    ) else {
-        commands.remove_resource::<GravityBindGroups>();
-        return;
-    };
-    let accel = accel.buffer.as_entire_binding();
-
-    let brute = device.create_bind_group(
-        "gravity_brute_bind_group",
-        &pipeline_cache.get_bind_group_layout(&pipelines.brute_layout),
-        &BindGroupEntries::sequential((
-            &sim_buffers.params,
-            buffers.bodies.as_entire_binding(),
-            buffers.body_count.as_entire_binding(),
-            accel.clone(),
-        )),
-    );
-    let barnes_hut = pipelines.barnes_hut.as_ref().map(|bh| BarnesHutBindGroups {
-        sort: device.create_bind_group(
-            "gravity_bh_sort_bind_group",
-            &pipeline_cache.get_bind_group_layout(&bh.sort_layout),
-            &BindGroupEntries::with_indices((
-                (0, &sim_buffers.params),
-                (1, radix_params),
-                (2, buffers.bodies.as_entire_binding()),
-                (3, buffers.body_count.as_entire_binding()),
-                (5, buffers.bounds.as_entire_binding()),
-                (6, buffers.keys.as_entire_binding()),
-                (7, buffers.vals.as_entire_binding()),
-                (8, buffers.hist.as_entire_binding()),
-            )),
-        ),
-        build: device.create_bind_group(
-            "gravity_bh_build_bind_group",
-            &pipeline_cache.get_bind_group_layout(&bh.build_layout),
-            &BindGroupEntries::with_indices((
-                (0, &sim_buffers.params),
-                (2, buffers.bodies.as_entire_binding()),
-                (3, buffers.body_count.as_entire_binding()),
-                (5, buffers.bounds.as_entire_binding()),
-                (6, buffers.keys.as_entire_binding()),
-                (7, buffers.vals.as_entire_binding()),
-                (9, buffers.nodes.as_entire_binding()),
-                (10, buffers.leaf_parent.as_entire_binding()),
-                (14, buffers.sorted_bodies.as_entire_binding()),
-            )),
-        ),
-        walk: device.create_bind_group(
-            "gravity_bh_walk_bind_group",
-            &pipeline_cache.get_bind_group_layout(&bh.walk_layout),
-            &BindGroupEntries::with_indices((
-                (0, &sim_buffers.params),
-                (3, buffers.body_count.as_entire_binding()),
-                (4, accel),
-                (9, buffers.nodes.as_entire_binding()),
-                (10, buffers.leaf_parent.as_entire_binding()),
-                (11, buffers.node_data.as_entire_binding()),
-                (12, buffers.visits.as_entire_binding()),
-                (13, buffers.packed_nodes.as_entire_binding()),
-                (14, buffers.sorted_bodies.as_entire_binding()),
-            )),
-        ),
-    });
-    commands.insert_resource(GravityBindGroups { brute, barnes_hut });
-}
-
-/// Which gravity passes run this frame, with their pipelines resolved.
+/// Which gravity passes a space runs this frame, with everything they need.
 pub(super) enum GravityPlan<'a> {
-    BruteForce(&'a ComputePipeline),
-    BarnesHut(BarnesHutResolved<'a>),
+    BruteForce { pipeline: &'a ComputePipeline, bind_group: &'a BindGroup, max_bodies: u32 },
+    BarnesHut {
+        pipelines: BarnesHutResolved<'a>,
+        bind_groups: &'a BarnesHutBindGroups,
+        buffers: &'a BarnesHutBuffers,
+        max_bodies: u32,
+    },
 }
 
 pub(super) struct BarnesHutResolved<'a> {
@@ -407,21 +416,28 @@ pub(super) struct BarnesHutResolved<'a> {
 }
 
 impl GravityPipelines {
-    /// Resolves the passes this frame needs. `None` while any of them is still compiling.
+    fn uses_barnes_hut(&self, params: &SimParams) -> bool {
+        params.gravity_method == GravityMethod::BarnesHut.as_gpu() && self.barnes_hut.is_some()
+    }
+
+    /// Resolves the passes a space needs. `None` while any of them is still compiling.
     pub(super) fn plan<'a>(
         &self,
         cache: &'a PipelineCache,
-        params: &SimParams,
-        bind_groups: &GravityBindGroups,
+        buffers: &'a GravityBuffers,
+        bind_groups: &'a GravityBindGroups,
     ) -> Option<GravityPlan<'a>> {
-        let use_barnes_hut = params.gravity_method == 1 && bind_groups.barnes_hut.is_some();
-        let Some(bh) = self.barnes_hut.as_ref().filter(|_| use_barnes_hut) else {
-            return Some(GravityPlan::BruteForce(
-                cache.get_compute_pipeline(self.brute_force)?,
-            ));
+        let max_bodies = buffers.max_bodies;
+        let bind_groups = match bind_groups {
+            GravityBindGroups::BruteForce(bind_group) => {
+                let pipeline = cache.get_compute_pipeline(self.brute_force)?;
+                return Some(GravityPlan::BruteForce { pipeline, bind_group, max_bodies });
+            }
+            GravityBindGroups::BarnesHut(bind_groups) => bind_groups,
         };
+        let bh = self.barnes_hut.as_ref()?;
         let get = |id| cache.get_compute_pipeline(id);
-        Some(GravityPlan::BarnesHut(BarnesHutResolved {
+        let pipelines = BarnesHutResolved {
             bounds: get(bh.bounds)?,
             morton: get(bh.morton)?,
             histogram: get(bh.histogram)?,
@@ -431,13 +447,15 @@ impl GravityPipelines {
             build_tree: get(bh.build_tree)?,
             summarize: get(bh.summarize)?,
             force: get(bh.force)?,
-        }))
+        };
+        let buffers = buffers.barnes_hut.as_ref()?;
+        Some(GravityPlan::BarnesHut { pipelines, bind_groups, buffers, max_bodies })
     }
 }
 
 /// Clears the per-frame Barnes-Hut accumulators. Must be recorded before the compute pass.
-pub(super) fn clear_buffers(encoder: &mut CommandEncoder, plan: &GravityPlan, buffers: &GravityBuffers) {
-    if let GravityPlan::BarnesHut(_) = plan {
+pub(super) fn clear_buffers(encoder: &mut CommandEncoder, plan: &GravityPlan) {
+    if let GravityPlan::BarnesHut { buffers, .. } = plan {
         encoder.clear_buffer(&buffers.bounds, 0, None);
         encoder.clear_buffer(&buffers.visits, 0, None);
     }
@@ -447,26 +465,20 @@ pub(super) fn clear_buffers(encoder: &mut CommandEncoder, plan: &GravityPlan, bu
 pub(super) fn dispatch(
     pass: &mut ComputePass,
     plan: &GravityPlan,
-    bind_groups: &GravityBindGroups,
-    buffers: &GravityBuffers,
     diagnostics: Option<&DiagnosticsRecorder>,
 ) {
     // The body count is only known on the GPU, so every pass is sized for the maximum;
     // workgroups past the real count exit immediately.
-    let body_groups = buffers.max_bodies.div_ceil(WORKGROUP_SIZE);
-
     match plan {
-        GravityPlan::BruteForce(pipeline) => {
+        GravityPlan::BruteForce { pipeline, bind_group, max_bodies } => {
             let span = diagnostics.time_span(pass, "gravity_brute_force");
-            pass.set_bind_group(0, &bind_groups.brute, &[]);
+            pass.set_bind_group(0, *bind_group, &[]);
             pass.set_pipeline(pipeline);
-            pass.dispatch_workgroups(body_groups, 1, 1);
+            pass.dispatch_workgroups(max_bodies.div_ceil(WORKGROUP_SIZE), 1, 1);
             span.end(pass);
         }
-        GravityPlan::BarnesHut(p) => {
-            let Some(groups) = &bind_groups.barnes_hut else {
-                return;
-            };
+        GravityPlan::BarnesHut { pipelines: p, bind_groups: groups, buffers, max_bodies } => {
+            let body_groups = max_bodies.div_ceil(WORKGROUP_SIZE);
             let scan_groups = (16 * body_groups).div_ceil(WORKGROUP_SIZE);
             let run = |pass: &mut ComputePass, pipeline: &ComputePipeline, workgroups: u32| {
                 pass.set_pipeline(pipeline);
@@ -504,7 +516,7 @@ pub(super) fn dispatch(
                 pass.set_bind_group(0, &groups.walk, &[]);
                 run(pass, p.summarize, body_groups);
             });
-            let force_groups = buffers.max_bodies.div_ceil(FORCE_WORKGROUP_SIZE);
+            let force_groups = max_bodies.div_ceil(FORCE_WORKGROUP_SIZE);
             timed(pass, "gravity_bh_5_force", &|pass| {
                 pass.set_bind_group(0, &groups.walk, &[]);
                 run(pass, p.force, force_groups);

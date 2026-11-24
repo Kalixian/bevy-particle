@@ -15,17 +15,18 @@ use bevy::{
     },
 };
 
-use crate::particle::ParticleBuffers;
+use crate::space::SpaceUploads;
 
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
         .init_resource::<SpecializedRenderPipelines<DrawPipeline>>()
+        .init_resource::<DrawBindGroups>()
         .add_systems(RenderStartup, init_pipeline)
         .add_systems(
             Render,
             (
                 specialize_views.in_set(RenderSystems::Queue),
-                prepare_bind_group.in_set(RenderSystems::PrepareBindGroups),
+                prepare_bind_groups.in_set(RenderSystems::PrepareBindGroups),
             ),
         )
         // After sprites/meshes, before bloom and tonemapping (Core2dSystems::PostProcess),
@@ -87,8 +88,9 @@ impl SpecializedRenderPipeline for DrawPipeline {
 #[derive(Component)]
 struct ViewDrawPipeline(CachedRenderPipelineId);
 
-#[derive(Resource)]
-struct DrawBindGroup(BindGroup);
+/// Each space's bind group and capacity, in draw order.
+#[derive(Resource, Default)]
+struct DrawBindGroups(Vec<(BindGroup, u32)>);
 
 fn init_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
     let layout = BindGroupLayoutDescriptor::new(
@@ -124,45 +126,47 @@ fn specialize_views(
     }
 }
 
-fn prepare_bind_group(
-    mut commands: Commands,
+fn prepare_bind_groups(
     pipeline: Res<DrawPipeline>,
     pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     view_uniforms: Res<ViewUniforms>,
-    particle_buffers: Option<Res<ParticleBuffers>>,
+    spaces: Res<SpaceUploads>,
     gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+    mut bind_groups: ResMut<DrawBindGroups>,
 ) {
-    let (Some(view_binding), Some(particles)) = (
-        view_uniforms.uniforms.binding(),
-        particle_buffers.and_then(|b| gpu_buffers.get(&b.particles)),
-    ) else {
-        commands.remove_resource::<DrawBindGroup>();
+    bind_groups.0.clear();
+    let Some(view_binding) = view_uniforms.uniforms.binding() else {
         return;
     };
-    let bind_group = device.create_bind_group(
-        "particle_draw_bind_group",
-        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((view_binding, particles.buffer.as_entire_binding())),
-    );
-    commands.insert_resource(DrawBindGroup(bind_group));
+    let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
+    bind_groups.0.extend(spaces.0.iter().filter_map(|space| {
+        let particles = gpu_buffers.get(&space.buffers.particles)?;
+        let bind_group = device.create_bind_group(
+            "particle_draw_bind_group",
+            &layout,
+            &BindGroupEntries::sequential((
+                view_binding.clone(),
+                particles.buffer.as_entire_binding(),
+            )),
+        );
+        Some((bind_group, space.buffers.capacity))
+    }));
 }
 
 fn draw_particles(
     view: ViewQuery<(&ViewTarget, &ViewUniformOffset, &ViewDrawPipeline)>,
     pipeline_cache: Res<PipelineCache>,
-    bind_group: Option<Res<DrawBindGroup>>,
-    particle_buffers: Option<Res<ParticleBuffers>>,
+    bind_groups: Res<DrawBindGroups>,
     mut ctx: RenderContext,
 ) {
     let (target, view_offset, view_pipeline) = view.into_inner();
-    let (Some(bind_group), Some(particle_buffers), Some(render_pipeline)) = (
-        bind_group,
-        particle_buffers,
-        pipeline_cache.get_render_pipeline(view_pipeline.0),
-    ) else {
+    let Some(render_pipeline) = pipeline_cache.get_render_pipeline(view_pipeline.0) else {
         return;
     };
+    if bind_groups.0.is_empty() {
+        return;
+    }
 
     let mut pass = ctx
         .command_encoder()
@@ -175,6 +179,8 @@ fn draw_particles(
             multiview_mask: None,
         });
     pass.set_pipeline(render_pipeline);
-    pass.set_bind_group(0, &bind_group.0, &[view_offset.offset]);
-    pass.draw(0..6, 0..particle_buffers.capacity);
+    for (bind_group, capacity) in &bind_groups.0 {
+        pass.set_bind_group(0, bind_group, &[view_offset.offset]);
+        pass.draw(0..6, 0..*capacity);
+    }
 }

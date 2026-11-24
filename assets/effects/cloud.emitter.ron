@@ -1,24 +1,24 @@
 // A one-off cloud of particles that never die. Only the cloud swirls.
 (
     emitter: (
-        burst_count: 300000,
+        burst_count: 6300000,
         rate: 0.0,
         lifetime: None,
-        spawn_half_extents: (300.0, 300.0),
+        spawn_half_extents: (400.0, 400.0),
         speed: (from: 0.0, to: 0.0),
         radius: (from: 0.3, to: 1.0),
         red: (from: 6.0, to: 9.0),
         green: (from: 0.0, to: 0.0),
         blue: (from: 6.0, to: 9.0),
-        alpha: (from: 0.05, to: 0.05),
+        alpha: (from: 0.01, to: 0.02),
     ),
     modifiers: [
         Vortex(
             offset: Constant((0.0, 0.0)),
-            strength: Constant(3000.0),
-            max_accel: Constant(60.0),
+            strength: Constant(500.0),
+            max_accel: Constant(10.0),
         ),
         // Without drag the vortex keeps adding speed and flings the cloud apart.
-        Drag(Constant(0.4)),
+        Drag(Constant(0.7)),
     ],
 )

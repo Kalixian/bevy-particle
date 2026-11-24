@@ -1,4 +1,4 @@
-use bevy::{prelude::*, render::extract_resource::ExtractResource, render::storage::ShaderBuffer};
+use bevy::{prelude::*, render::storage::ShaderBuffer};
 use bytemuck::{Pod, Zeroable};
 
 /// One particle slot in the GPU particle buffer.
@@ -34,19 +34,22 @@ pub struct GpuParticle {
 
 const _: () = assert!(size_of::<GpuParticle>() == 64);
 
-/// The GPU buffers backing a particle space.
+/// The GPU buffers backing a particle space, on the space entity.
 ///
 /// - `particles`: `capacity` slots of [`GpuParticle`], zero-initialized (all dead).
 /// - `free_list`: `[count: i32, indices: [u32; capacity]]`, a stack of dead slot indices.
 ///   Starts full. The integrate pass pushes slots as particles die; the spawn pass pops them.
-#[derive(Resource, Clone, ExtractResource)]
-#[extract_app(bevy::render::RenderApp)]
+#[derive(Component, Clone, Debug)]
 pub struct ParticleBuffers {
-    /// The `ParticleSpace` entity these belong to; dropped when it's despawned.
-    pub space: Entity,
     pub particles: Handle<ShaderBuffer>,
     pub free_list: Handle<ShaderBuffer>,
-    /// `capacity` × `vec2<f32>`: per-slot gravity acceleration.
-    pub accel: Handle<ShaderBuffer>,
     pub capacity: u32,
+}
+
+impl ParticleBuffers {
+    /// Identifies this set of buffers. Unlike the space entity, it changes if the space's
+    /// buffers are ever recreated.
+    pub fn id(&self) -> AssetId<ShaderBuffer> {
+        self.particles.id()
+    }
 }
