@@ -13,22 +13,7 @@
 // The body count n is only known on the GPU (written by `compact`), so every pass is
 // dispatched for the maximum M and threads past n do nothing.
 
-// Must match `SimParams` in src/space.rs.
-struct SimParams {
-    dt: f32,
-    capacity: u32,
-    spawn_total: u32,
-    emitter_count: u32,
-    frame: u32,
-    modifier_offset: u32,
-    modifier_count: u32,
-    gravity_enabled: u32,
-    gravity_strength: f32,
-    gravity_softening_sq: f32,
-    gravity_method: u32,
-    gravity_max_bodies: u32,
-    gravity_theta_sq: f32,
-}
+import package::gpu::shaders::types::SimParams;
 
 // Must match `RadixPassParams` in src/gpu/gravity.rs. Bound with a dynamic offset per pass.
 struct RadixPass {

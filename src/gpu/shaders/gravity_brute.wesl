@@ -7,22 +7,7 @@
 // Softened (Plummer) gravity: a_i = G · Σ_j m_j · d / (|d|² + ε²)^(3/2), with d = x_j − x_i.
 // The j = i term has d = 0 and contributes nothing, so it needs no special case.
 
-// Must match `SimParams` in src/space.rs.
-struct SimParams {
-    dt: f32,
-    capacity: u32,
-    spawn_total: u32,
-    emitter_count: u32,
-    frame: u32,
-    modifier_offset: u32,
-    modifier_count: u32,
-    gravity_enabled: u32,
-    gravity_strength: f32,
-    gravity_softening_sq: f32,
-    gravity_method: u32,
-    gravity_max_bodies: u32,
-    gravity_theta_sq: f32,
-}
+import package::gpu::shaders::types::SimParams;
 
 const TILE: u32 = 256u;
 

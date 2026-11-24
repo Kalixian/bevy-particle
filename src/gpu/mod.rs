@@ -4,6 +4,8 @@
 mod compute;
 mod draw;
 mod gravity;
+#[cfg(test)]
+mod shader_tests;
 
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -11,8 +13,10 @@ use std::sync::{
 };
 
 use bevy::{
+    asset::embedded_asset,
     prelude::*,
     render::{extract_resource::ExtractResourcePlugin, Extract, ExtractSchedule, RenderApp},
+    shader::load_shader_library,
 };
 
 use crate::{
@@ -23,6 +27,17 @@ pub struct ParticleGpuPlugin;
 
 impl Plugin for ParticleGpuPlugin {
     fn build(&self, app: &mut App) {
+        // Embedded rather than loaded from `assets/`: WESL imports don't tell modules from
+        // items, so Bevy would probe for asset files that don't exist (failed requests on the
+        // web). List every shader in `shader_tests.rs` too.
+        load_shader_library!(app, "shaders/types.wesl");
+        load_shader_library!(app, "shaders/random.wesl");
+        load_shader_library!(app, "shaders/tracks.wesl");
+        embedded_asset!(app, "shaders/particle_sim.wesl");
+        embedded_asset!(app, "shaders/particle_draw.wesl");
+        embedded_asset!(app, "shaders/gravity_brute.wesl");
+        embedded_asset!(app, "shaders/gravity_bh.wesl");
+
         app.add_plugins((
             ExtractResourcePlugin::<ParticleBuffers>::default(),
             ExtractResourcePlugin::<SimParams>::default(),

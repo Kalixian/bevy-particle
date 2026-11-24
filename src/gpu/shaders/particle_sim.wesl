@@ -1,38 +1,10 @@
 // Particle simulation: `integrate` runs once per slot, then `spawn` once per spawn request.
 
-// Must match `GpuParticle` in src/particle.rs (64-byte stride).
-// Alive when lifetime < 0 (immortal) or age < lifetime. All-zero = dead.
-struct Particle {
-    position: vec2<f32>,
-    velocity: vec2<f32>,
-    color: vec4<f32>,
-    mass: f32,
-    radius: f32,
-    age: f32,
-    lifetime: f32,
-    emitter: u32,
-    // Spawn values that appearance modifiers start from each frame.
-    base_radius: f32,
-    base_color: vec2<u32>,
-}
-
-// Must match `SimParams` in src/space.rs.
-struct SimParams {
-    dt: f32,
-    capacity: u32,
-    spawn_total: u32,
-    emitter_count: u32,
-    frame: u32,
-    // The space's slice of `modifiers`.
-    modifier_offset: u32,
-    modifier_count: u32,
-    gravity_enabled: u32,
-    gravity_strength: f32,
-    gravity_softening_sq: f32,
-    gravity_method: u32,
-    gravity_max_bodies: u32,
-    gravity_theta_sq: f32,
-}
+import package::gpu::shaders::types::{
+    Particle, SimParams, is_alive, pack_emitter, emitter_slot, emitter_generation
+};
+import package::gpu::shaders::random::{pcg_hash, rand};
+import package::gpu::shaders::tracks::{tracks, sample_track, CLOCK_SECONDS};
 
 // Must match `GpuEmitter` in src/emitter.rs. vec2 fields are (start, end) ranges, each
 // shaped by its `*_curve` (see `sample_spread`).
@@ -51,6 +23,8 @@ struct Emitter {
     spawn_offset: u32,
     spawn_count: u32,
     enabled: u32,
+    // Particles of other generations belonged to an earlier emitter in this slot.
+    generation: u32,
     modifier_offset: u32,
     modifier_count: u32,
     gravity: u32,
@@ -82,15 +56,6 @@ struct Modifier {
     b: vec4<f32>,
 }
 
-// Keyframe tracks: a header record, then one record per key. Must match `GpuTrackRecord`
-// in src/track.rs.
-//   header: data.x = period, info = (key count, clock + 2 * repeat, slot, width)
-//   key:    data = value, info = (bitcast time, ease, 0, 0)
-struct TrackRecord {
-    data: vec4<f32>,
-    info: vec4<u32>,
-}
-
 // Stack of dead slot indices. `count` is signed so that failed pops can briefly
 // take it below zero without wrapping (see `spawn`).
 struct FreeList {
@@ -108,7 +73,6 @@ struct FreeList {
 @group(0) @binding(6) var<storage, read_write> body_count: atomic<u32>;
 @group(0) @binding(7) var<storage, read> accel: array<vec2<f32>>;
 @group(0) @binding(8) var<storage, read> curves: array<Curve>;
-@group(0) @binding(9) var<storage, read> tracks: array<TrackRecord>;
 
 const MOD_ACCELERATION: u32 = 0u;
 const MOD_POINT_ATTRACTOR: u32 = 1u;
@@ -122,14 +86,9 @@ const MOD_ALPHA: u32 = 6u;
 const MOD_SIZE: u32 = 7u;
 const MOD_MASS: u32 = 8u;
 
-const CLOCK_SECONDS: u32 = 1u;
-const REPEAT_LOOP: u32 = 1u;
-const REPEAT_PING_PONG: u32 = 2u;
-const EASE_SMOOTH: u32 = 1u;
-const EASE_STEP: u32 = 2u;
-
-fn is_alive(p: Particle) -> bool {
-    return p.lifetime < 0.0 || p.age < p.lifetime;
+// Whether `e` is still the emitter that spawned `p`.
+fn owns(e: Emitter, p: Particle) -> bool {
+    return e.enabled != 0u && e.generation == emitter_generation(p);
 }
 
 fn kill(i: u32) {
@@ -147,7 +106,11 @@ fn compact(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let p = particles[i];
-    if !is_alive(p) || emitters[p.emitter].gravity == 0u {
+    if !is_alive(p) {
+        return;
+    }
+    let emitter = emitters[emitter_slot(p)];
+    if !owns(emitter, p) || emitter.gravity == 0u {
         return;
     }
     let k = atomicAdd(&body_count, 1u);
@@ -171,8 +134,8 @@ fn integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     p.age += params.dt;
-    let emitter = emitters[p.emitter];
-    if !is_alive(p) || emitter.enabled == 0u {
+    let emitter = emitters[emitter_slot(p)];
+    if !is_alive(p) || !owns(emitter, p) {
         kill(i);
         return;
     }
@@ -228,58 +191,6 @@ fn write_slots(current: vec4<f32>, value: vec4<f32>, base: i32, slot: i32, width
     let c = clamp(i, vec4(0), vec4(3));
     let moved = vec4(value[c.x], value[c.y], value[c.z], value[c.w]);
     return select(current, moved, covered);
-}
-
-// Fraction of life used; 0 for immortal particles.
-fn life_fraction(p: Particle) -> f32 {
-    if p.lifetime > 0.0 {
-        return saturate(p.age / p.lifetime);
-    }
-    return 0.0;
-}
-
-// Must match `Track::sample` in src/track.rs.
-fn sample_track(header: u32, p: Particle) -> vec4<f32> {
-    let period = tracks[header].data.x;
-    let count = tracks[header].info.x;
-    let clock = tracks[header].info.y & 1u;
-    let repeat = tracks[header].info.y >> 1u;
-
-    var t = life_fraction(p);
-    if clock == CLOCK_SECONDS {
-        t = p.age;
-    }
-    if period > 0.0 {
-        if repeat == REPEAT_LOOP {
-            t -= period * floor(t / period);
-        } else if repeat == REPEAT_PING_PONG {
-            let cycle = 2.0 * period;
-            t = period - abs(t - cycle * floor(t / cycle) - period);
-        }
-    }
-
-    // `next` = the first key after t.
-    let first = header + 1u;
-    var next = 0u;
-    while next < count && bitcast<f32>(tracks[first + next].info.x) <= t {
-        next++;
-    }
-    if next == 0u {
-        return tracks[first].data;
-    }
-    let from_key = tracks[first + next - 1u];
-    if next == count {
-        return from_key.data;
-    }
-    let to_key = tracks[first + next];
-    let from_time = bitcast<f32>(from_key.info.x);
-    var x = (t - from_time) / (bitcast<f32>(to_key.info.x) - from_time);
-    if from_key.info.y == EASE_SMOOTH {
-        x = x * x * (3.0 - 2.0 * x);
-    } else if from_key.info.y == EASE_STEP {
-        x = 0.0;
-    }
-    return mix(from_key.data, to_key.data, x);
 }
 
 fn apply_force(p: ptr<function, Particle>, m: Modifier) {
@@ -412,7 +323,7 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     p.radius = radius;
     p.age = 0.0;
     p.lifetime = lifetime;
-    p.emitter = e;
+    p.emitter = pack_emitter(e, em.generation);
     p.base_radius = radius;
     // 65504 is the largest half float.
     let packed = clamp(p.color, vec4(-65504.0), vec4(65504.0));
@@ -425,19 +336,6 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // --- helpers ---
-
-// PCG hash (Jarzynski & Olano, "Hash Functions for GPU Rendering", 2020).
-fn pcg_hash(v: u32) -> u32 {
-    let state = v * 747796405u + 2891336453u;
-    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-// Uniform in [0, 1).
-fn rand(state: ptr<function, u32>) -> f32 {
-    *state = pcg_hash(*state);
-    return f32(*state >> 8u) / 16777216.0;
-}
 
 // A random value in `range` (start, end), distributed by `curve` (see src/spread.rs):
 // a uniform u is bent through the curve's lookup table, then mapped into the range.

@@ -1,11 +1,11 @@
 //! N-body gravity between particles.
 //!
 //! Each frame, when the space has `Gravity`:
-//! 1. `compact` (in `particle_sim.wgsl`) packs every live particle whose emitter has
+//! 1. `compact` (in `particle_sim.wesl`) packs every live particle whose emitter has
 //!    `gravity: true` into `bodies` as `(x, y, mass, slot)` and counts them in `body_count`.
 //! 2. One of:
-//!    - brute force (`gravity_brute.wgsl`): exact, O(n²);
-//!    - Barnes-Hut (`gravity_bh.wgsl`): bounds → Morton codes → radix sort → tree build →
+//!    - brute force (`gravity_brute.wesl`): exact, O(n²);
+//!    - Barnes-Hut (`gravity_bh.wesl`): bounds → Morton codes → radix sort → tree build →
 //!      mass summary → tree walk, O(n log n).
 //!
 //!    Both write `accel[slot]`.
@@ -14,6 +14,7 @@
 use std::borrow::Cow;
 
 use bevy::{
+    asset::load_embedded_asset,
     prelude::*,
     render::{
         render_asset::RenderAssets,
@@ -31,14 +32,12 @@ use bevy::{
 use super::compute::SimBuffers;
 use crate::{particle::ParticleBuffers, space::SimParams};
 
-const BRUTE_SHADER: &str = "shaders/gravity_brute.wgsl";
-const BARNES_HUT_SHADER: &str = "shaders/gravity_bh.wgsl";
-const WORKGROUP_SIZE: u32 = 256;
+pub(super) const WORKGROUP_SIZE: u32 = 256;
 /// Most storage buffers any Barnes-Hut layout binds (WebGPU's default limit per stage).
 const BARNES_HUT_STORAGE_BUFFERS: u32 = 8;
 const RADIX_PASSES: usize = 8;
-/// Must match `FORCE_WG` in `gravity_bh.wgsl`.
-const FORCE_WORKGROUP_SIZE: u32 = 256;
+/// Must match `FORCE_WG` in `gravity_bh.wesl`.
+pub(super) const FORCE_WORKGROUP_SIZE: u32 = 256;
 
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
@@ -52,9 +51,9 @@ pub(super) fn build(render_app: &mut SubApp) {
         );
 }
 
-/// Must match `struct RadixPass` in `gravity_bh.wgsl`.
-#[derive(ShaderType, Clone, Copy, Default)]
-struct RadixPassParams {
+/// Must match `struct RadixPass` in `gravity_bh.wesl`.
+#[derive(ShaderType, Clone, Copy, Debug, Default)]
+pub(super) struct RadixPassParams {
     shift: u32,
     src: u32,
     dst: u32,
@@ -144,7 +143,7 @@ fn init_pipelines(
     let brute_force = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
         label: Some("gravity_brute".into()),
         layout: vec![brute_layout.clone()],
-        shader: asset_server.load(BRUTE_SHADER),
+        shader: load_embedded_asset!(asset_server.as_ref(), "shaders/gravity_brute.wesl"),
         entry_point: Some(Cow::from("gravity")),
         ..default()
     });
@@ -221,7 +220,7 @@ fn queue_barnes_hut(asset_server: &AssetServer, pipeline_cache: &PipelineCache) 
             ),
         ),
     );
-    let shader: Handle<Shader> = asset_server.load(BARNES_HUT_SHADER);
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server, "shaders/gravity_bh.wesl");
     let queue = |entry_point: &'static str, layout: &BindGroupLayoutDescriptor| {
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(format!("gravity_bh_{entry_point}").into()),

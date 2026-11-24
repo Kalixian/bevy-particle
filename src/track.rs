@@ -182,7 +182,7 @@ impl<T: Keyable> Track<T> {
     }
 
     /// The value at clock time `t`, or `None` with no keys. Must match `sample_track` in
-    /// `particle_sim.wgsl`.
+    /// `tracks.wesl`.
     fn sample(&self, t: f32) -> Option<Vec4> {
         let period = self.keys.last()?.time;
         let t = match self.repeat() {
@@ -230,7 +230,7 @@ impl<T> From<Track<T>> for Animated<T> {
 }
 
 /// A track is one header record followed by one record per key. Must match
-/// `struct TrackRecord` in `particle_sim.wgsl`.
+/// `struct TrackRecord` in `tracks.wesl`.
 ///
 /// - Header: `data.x` = period, `info` = (key count, clock + 2 · repeat, slot, width).
 /// - Key: `data` = value, `info` = (time as f32 bits, ease, 0, 0).

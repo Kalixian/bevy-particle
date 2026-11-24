@@ -66,7 +66,7 @@ pub enum ModifierSystems {
 }
 
 /// Behaviors applied to particles every frame. Add a variant here and a matching `case` in
-/// `apply_force` or `apply_appearance` in `particle_sim.wgsl`.
+/// `apply_force` or `apply_appearance` in `particle_sim.wesl`.
 ///
 /// Every parameter is an [`Animated`]: a constant or a keyframe `Track`, via `.into()`.
 ///
@@ -134,7 +134,7 @@ impl Blend {
 #[serde(transparent)]
 pub struct Modifiers(pub Vec<Modifier>);
 
-/// One modifier as seen by the GPU. Must match `struct Modifier` in `particle_sim.wgsl`.
+/// One modifier as seen by the GPU. Must match `struct Modifier` in `particle_sim.wesl`.
 /// The meaning of `a` and `b` depends on `kind`; see [`GpuModifier::encode`].
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct GpuModifier {

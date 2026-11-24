@@ -55,9 +55,8 @@ pub struct SpaceState {
     age: f32,
 }
 
-/// Per-frame simulation uniforms. Must match `struct SimParams` in every shader under
-/// `assets/shaders/` that declares it.
-#[derive(Resource, Clone, Copy, Default, ExtractResource, ShaderType)]
+/// Per-frame simulation uniforms. Must match `struct SimParams` in `types.wesl`.
+#[derive(Resource, Clone, Copy, Debug, Default, ExtractResource, ShaderType)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct SimParams {
     pub dt: f32,

@@ -104,17 +104,50 @@ pub struct EmitterState {
     age: f32,
 }
 
-/// Maps emitter entities to their index in the GPU emitter array.
+/// Emitter references have 16 bits for the slot.
+const MAX_EMITTERS: usize = 1 << 16;
+
+/// Maps emitter entities to their slot (index) in the GPU emitter array.
 ///
-/// Particles store that index, so it must stay stable while the emitter exists. Slots of
-/// despawned emitters stay inactive (their particles die) and aren't reused, except that
-/// the whole list starts over once every emitter is gone.
+/// Particles store their emitter's slot and the slot's generation. A slot keeps its place
+/// while its emitter exists and is reused afterwards; its generation goes up each time it's
+/// released, so the GPU can tell (and kill) particles left over from an earlier emitter.
+/// Slots are never removed, since that would forget their generations.
 #[derive(Resource, Default)]
 pub struct EmitterRegistry {
-    slots: Vec<Option<Entity>>,
+    slots: Vec<EmitterSlot>,
 }
 
-/// One emitter as seen by the GPU. Must match `struct Emitter` in `particle_sim.wgsl`.
+#[derive(Debug, Default)]
+struct EmitterSlot {
+    entity: Option<Entity>,
+    /// 16 bits to fit in an emitter reference. Wrapping is fine: every simulated frame kills
+    /// the particles of older generations.
+    generation: u16,
+}
+
+impl EmitterRegistry {
+    /// Gives `entity` a slot. `false` if every slot is taken.
+    fn register(&mut self, entity: Entity) -> bool {
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.entity.is_none()) {
+            slot.entity = Some(entity);
+        } else if self.slots.len() < MAX_EMITTERS {
+            self.slots.push(EmitterSlot { entity: Some(entity), generation: 0 });
+        } else {
+            return false;
+        }
+        true
+    }
+
+    fn release(&mut self, entity: Entity) {
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.entity == Some(entity)) {
+            slot.entity = None;
+            slot.generation = slot.generation.wrapping_add(1);
+        }
+    }
+}
+
+/// One emitter as seen by the GPU. Must match `struct Emitter` in `particle_sim.wesl`.
 ///
 /// Each `Vec2` range is (start, end) and has a `*_curve` index into the curve array
 /// (`NO_CURVE` for uniform).
@@ -139,6 +172,8 @@ pub struct GpuEmitter {
     pub spawn_count: u32,
     /// 0 for despawned emitters; their particles are killed.
     pub enabled: u32,
+    /// The slot's generation; particles of any other generation are killed.
+    pub generation: u32,
     /// This emitter's slice of the modifier array.
     pub modifier_offset: u32,
     pub modifier_count: u32,
@@ -185,16 +220,12 @@ fn register_emitters(
     mut removed: RemovedComponents<ParticleEmitter>,
 ) {
     for entity in removed.read() {
-        if let Some(slot) = registry.slots.iter_mut().find(|s| **s == Some(entity)) {
-            *slot = None;
-        }
-    }
-    // With every emitter gone (e.g. the space was reset), start numbering from 0 again.
-    if registry.slots.iter().all(Option::is_none) {
-        registry.slots.clear();
+        registry.release(entity);
     }
     for entity in &added {
-        registry.slots.push(Some(entity));
+        if !registry.register(entity) {
+            warn!("Only {MAX_EMITTERS} emitters are supported; ignoring {entity}");
+        }
     }
 }
 
@@ -223,7 +254,7 @@ fn prepare_emitter_upload(
     upload.curves.clear();
     for slot in &registry.slots {
         let Some((emitter, mut state, transform, modifiers, mouse)) =
-            slot.and_then(|e| emitters.get_mut(e).ok())
+            slot.entity.and_then(|e| emitters.get_mut(e).ok())
         else {
             upload.emitters.push(GpuEmitter::default());
             continue;
@@ -270,6 +301,7 @@ fn prepare_emitter_upload(
             spawn_offset: spawn_total,
             spawn_count,
             enabled: 1,
+            generation: slot.generation.into(),
             modifier_offset,
             modifier_count,
             gravity: emitter.gravity as u32,
@@ -289,4 +321,39 @@ fn prepare_emitter_upload(
         upload.emitters.push(GpuEmitter::default());
     }
     upload.spawn_total = spawn_total;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reused_slots_get_a_new_generation() {
+        let mut world = World::new();
+        let [a, b, c] = std::array::from_fn(|_| world.spawn_empty().id());
+        let mut registry = EmitterRegistry::default();
+        assert!(registry.register(a) && registry.register(b));
+
+        registry.release(a);
+        assert!(registry.register(c));
+        let slots: Vec<_> = registry.slots.iter().map(|s| (s.entity, s.generation)).collect();
+        assert_eq!(slots, [(Some(c), 1), (Some(b), 0)]);
+
+        // Generations survive every emitter being gone.
+        registry.release(b);
+        registry.release(c);
+        assert!(registry.register(a));
+        let first = &registry.slots[0];
+        assert_eq!((first.entity, first.generation), (Some(a), 2));
+    }
+
+    #[test]
+    fn registering_fails_when_every_slot_is_taken() {
+        let mut registry = EmitterRegistry::default();
+        registry.slots.resize_with(MAX_EMITTERS, || EmitterSlot {
+            entity: Some(Entity::PLACEHOLDER),
+            generation: 0,
+        });
+        assert!(!registry.register(World::new().spawn_empty().id()));
+    }
 }

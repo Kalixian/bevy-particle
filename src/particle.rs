@@ -3,7 +3,7 @@ use bytemuck::{Pod, Zeroable};
 
 /// One particle slot in the GPU particle buffer.
 ///
-/// Must match `struct Particle` in every shader under `assets/shaders/`.
+/// Must match `struct Particle` in `types.wesl`.
 /// Layout (std430, 64 bytes): position @0, velocity @8, color @16, mass @32, radius @36,
 /// age @40, lifetime @44, emitter @48, base_radius @52, base_color @56.
 ///
@@ -22,7 +22,8 @@ pub struct GpuParticle {
     pub age: f32,
     /// Seconds the particle lives; negative means it never dies.
     pub lifetime: f32,
-    /// Index of the owning emitter in the GPU emitter array (see `EmitterRegistry`).
+    /// The owning emitter: its slot in the GPU emitter array in the low 16 bits and the
+    /// slot's generation in the high 16 (see `EmitterRegistry`).
     pub emitter: u32,
     /// Spawn values. Every frame color, radius and mass (= radius × the emitter's
     /// `mass_per_radius`) start from these before appearance modifiers apply.

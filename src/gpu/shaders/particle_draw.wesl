@@ -1,20 +1,7 @@
 // Draws one quad per particle (6 vertices, one instance each) straight from the particle
 // buffer, then cuts it to a disk in the fragment shader.
 
-// Must match `GpuParticle` in src/particle.rs (64-byte stride).
-struct Particle {
-    position: vec2<f32>,
-    velocity: vec2<f32>,
-    color: vec4<f32>,
-    mass: f32,
-    radius: f32,
-    age: f32,
-    lifetime: f32,
-    emitter: u32,
-    // Spawn values that appearance modifiers start from each frame.
-    base_radius: f32,
-    base_color: vec2<u32>,
-}
+import package::gpu::shaders::types::{Particle, is_alive};
 
 // Only the first field of Bevy's `View` uniform; the rest of the binding is ignored.
 struct View {
@@ -45,7 +32,7 @@ fn vertex(
 
     var out: VertexOutput;
     // Every slot is drawn; dead ones collapse to a degenerate point and are clipped.
-    if !(p.lifetime < 0.0 || p.age < p.lifetime) {
+    if !is_alive(p) {
         out.clip_position = vec4(0.0);
         return out;
     }

@@ -1,4 +1,5 @@
 use bevy::{
+    asset::load_embedded_asset,
     core_pipeline::{core_2d::main_transparent_pass_2d, schedule::Core2d, Core2dSystems},
     prelude::*,
     render::{
@@ -15,8 +16,6 @@ use bevy::{
 };
 
 use crate::particle::ParticleBuffers;
-
-const SHADER_ASSET_PATH: &str = "shaders/particle_draw.wgsl";
 
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
@@ -104,7 +103,7 @@ fn init_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
     );
     commands.insert_resource(DrawPipeline {
         layout,
-        shader: asset_server.load(SHADER_ASSET_PATH),
+        shader: load_embedded_asset!(asset_server.as_ref(), "shaders/particle_draw.wesl"),
     });
 }
 

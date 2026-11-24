@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use bevy::{
+    asset::load_embedded_asset,
     core_pipeline::schedule::camera_driver,
     prelude::*,
     render::{
@@ -32,9 +33,8 @@ use crate::{
     space::SimParams,
 };
 
-const SHADER_ASSET_PATH: &str = "shaders/particle_sim.wgsl";
 /// Must match `@workgroup_size` in the shaders.
-const WORKGROUP_SIZE: u32 = 256;
+pub(super) const WORKGROUP_SIZE: u32 = 256;
 
 pub(super) fn build(render_app: &mut SubApp) {
     render_app
@@ -121,7 +121,7 @@ fn init_pipelines(
             ),
         ),
     );
-    let shader: Handle<Shader> = asset_server.load(SHADER_ASSET_PATH);
+    let shader: Handle<Shader> = load_embedded_asset!(asset_server.as_ref(), "shaders/particle_sim.wesl");
     let queue = |entry_point: &'static str, layout: &BindGroupLayoutDescriptor| {
         pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(format!("particle_{entry_point}").into()),

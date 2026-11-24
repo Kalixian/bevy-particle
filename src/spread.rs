@@ -14,9 +14,9 @@ use std::ops::Range;
 use bevy::{prelude::*, render::render_resource::ShaderType};
 use serde::{Deserialize, Serialize};
 
-/// Points per lookup table. Must match `CURVE_SAMPLES` in `particle_sim.wgsl`.
+/// Points per lookup table. Must match `CURVE_SAMPLES` in `particle_sim.wesl`.
 pub const CURVE_SAMPLES: usize = 32;
-/// Curve index meaning "uniform, no table". Must match `NO_CURVE` in `particle_sim.wgsl`.
+/// Curve index meaning "uniform, no table". Must match `NO_CURVE` in `particle_sim.wesl`.
 pub const NO_CURVE: u32 = u32::MAX;
 
 /// A random range with a distribution shape.
@@ -130,7 +130,7 @@ impl Shape {
 }
 
 /// A shape's lookup table: `t` at `u = i / (CURVE_SAMPLES - 1)`, packed four per `Vec4`.
-/// Must match `struct Curve` in `particle_sim.wgsl`.
+/// Must match `struct Curve` in `particle_sim.wesl`.
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct GpuCurve {
     samples: [Vec4; CURVE_SAMPLES / 4],
