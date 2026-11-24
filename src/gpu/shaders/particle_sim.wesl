@@ -1,9 +1,15 @@
 // Particle simulation: `integrate` runs once per slot, then `spawn` once per spawn request.
 
 import package::gpu::shaders::types::{
-    Particle, SimParams, is_alive, pack_emitter, emitter_slot, emitter_generation
+    Particle, SimParams, Modifier, is_alive, pack_emitter, emitter_slot, emitter_generation
 };
 import package::gpu::shaders::random::{pcg_hash, rand};
+import package::gpu::shaders::modifier_kinds::{
+    MOD_ACCELERATION, MOD_POINT_ATTRACTOR, MOD_VORTEX, MOD_DRAG, MOD_BOUNDS,
+    MOD_COLOR, MOD_ALPHA, MOD_SIZE, MOD_MASS,
+    acceleration_params, point_attractor_params, vortex_params, drag_params, bounds_params,
+    color_params, alpha_params, size_params, mass_params
+};
 import package::gpu::shaders::tracks::{tracks, sample_track, CLOCK_SECONDS};
 
 // Must match `GpuEmitter` in src/emitter.rs. vec2 fields are (start, end) ranges, each
@@ -25,8 +31,8 @@ struct Emitter {
     enabled: u32,
     // Particles of other generations belonged to an earlier emitter in this slot.
     generation: u32,
-    modifier_offset: u32,
-    modifier_count: u32,
+    // Where its forces, constraints and appearance modifiers start in `modifiers`, and the end.
+    modifiers: vec4<u32>,
     gravity: u32,
     speed_curve: u32,
     angle_curve: u32,
@@ -46,16 +52,6 @@ struct Curve {
     samples: array<vec4<f32>, 8>,
 }
 
-// Must match `GpuModifier` in src/modifier.rs; `a`/`b` are decoded per kind below.
-struct Modifier {
-    kind: u32,
-    // This modifier's tracks, back to back in `tracks`.
-    track_offset: u32,
-    track_count: u32,
-    a: vec4<f32>,
-    b: vec4<f32>,
-}
-
 // Stack of dead slot indices. `count` is signed so that failed pops can briefly
 // take it below zero without wrapping (see `spawn`).
 struct FreeList {
@@ -73,18 +69,6 @@ struct FreeList {
 @group(0) @binding(6) var<storage, read_write> body_count: atomic<u32>;
 @group(0) @binding(7) var<storage, read> accel: array<vec2<f32>>;
 @group(0) @binding(8) var<storage, read> curves: array<Curve>;
-
-const MOD_ACCELERATION: u32 = 0u;
-const MOD_POINT_ATTRACTOR: u32 = 1u;
-const MOD_VORTEX: u32 = 2u;
-const MOD_DRAG: u32 = 3u;
-const MOD_BOUNDS: u32 = 4u;
-// Kinds from here on are appearance modifiers; the ones before are forces.
-const MOD_FIRST_APPEARANCE: u32 = 5u;
-const MOD_COLOR: u32 = 5u;
-const MOD_ALPHA: u32 = 6u;
-const MOD_SIZE: u32 = 7u;
-const MOD_MASS: u32 = 8u;
 
 // Whether `e` is still the emitter that spawned `p`.
 fn owns(e: Emitter, p: Particle) -> bool {
@@ -150,22 +134,34 @@ fn integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     p.radius = p.base_radius;
     p.mass = p.base_radius * emitter.mass_per_radius;
 
-    // Space modifiers first, then the particle's own emitter's.
-    apply_modifiers(&p, params.modifier_offset, params.modifier_count, true);
-    apply_modifiers(&p, emitter.modifier_offset, emitter.modifier_count, true);
+    // In each phase, the space's modifiers first, then the particle's own emitter's.
+    // Constraints come after all forces, so nothing can push through them.
+    apply_forces(&p, params.modifiers);
+    apply_forces(&p, emitter.modifiers);
+    apply_constraints(&p, params.modifiers);
+    apply_constraints(&p, emitter.modifiers);
+    apply_appearances(&p, params.modifiers);
+    apply_appearances(&p, emitter.modifiers);
 
     p.position += p.velocity * params.dt;
     particles[i] = p;
 }
 
-fn apply_modifiers(p: ptr<function, Particle>, offset: u32, count: u32, forces: bool) {
-    for (var k = offset; k < offset + count; k++) {
-        let m = modifiers[k];
-        if m.kind >= MOD_FIRST_APPEARANCE {
-            apply_appearance(p, m);
-        } else if forces {
-            apply_force(p, resolve(m, *p));
-        }
+fn apply_forces(p: ptr<function, Particle>, range: vec4<u32>) {
+    for (var k = range.x; k < range.y; k++) {
+        apply_force(p, resolve(modifiers[k], *p));
+    }
+}
+
+fn apply_constraints(p: ptr<function, Particle>, range: vec4<u32>) {
+    for (var k = range.y; k < range.z; k++) {
+        apply_constraint(p, resolve(modifiers[k], *p));
+    }
+}
+
+fn apply_appearances(p: ptr<function, Particle>, range: vec4<u32>) {
+    for (var k = range.z; k < range.w; k++) {
+        apply_appearance(p, modifiers[k]);
     }
 }
 
@@ -197,44 +193,48 @@ fn apply_force(p: ptr<function, Particle>, m: Modifier) {
     let dt = params.dt;
 
     switch m.kind {
-        // a.xy = acceleration
         case MOD_ACCELERATION: {
-            (*p).velocity += m.a.xy * dt;
+            (*p).velocity += acceleration_params(m).accel * dt;
         }
-        // a.xy = center (world), a.z = strength, a.w = max accel
         case MOD_POINT_ATTRACTOR: {
-            let offset = m.a.xy - (*p).position;
+            let a = point_attractor_params(m);
+            let offset = a.center - (*p).position;
             let distance_sq = dot(offset, offset);
             if distance_sq > 0.0 {
-                let accel = min(abs(m.a.z) / max(distance_sq, 1.0), m.a.w) * sign(m.a.z);
-                (*p).velocity += normalize(offset) * accel * dt;
+                let pull = min(abs(a.strength) / max(distance_sq, 1.0), a.max_accel);
+                (*p).velocity += normalize(offset) * pull * sign(a.strength) * dt;
             }
         }
-        // a.xy = center (world), a.z = strength, a.w = max accel
         case MOD_VORTEX: {
-            let offset = (*p).position - m.a.xy;
+            let v = vortex_params(m);
+            let offset = (*p).position - v.center;
             let distance = length(offset);
             if distance > 0.0 {
                 let tangent = vec2(-offset.y, offset.x) / distance;
-                let accel = min(abs(m.a.z) / max(distance, 1.0), m.a.w) * sign(m.a.z);
-                (*p).velocity += tangent * accel * dt;
+                let pull = min(abs(v.strength) / max(distance, 1.0), v.max_accel);
+                (*p).velocity += tangent * pull * sign(v.strength) * dt;
             }
         }
-        // a.x = drag coefficient
         case MOD_DRAG: {
-            (*p).velocity *= exp(-m.a.x * dt);
+            (*p).velocity *= exp(-drag_params(m).coefficient * dt);
         }
-        // a.xy = center (world), a.zw = half extents, b.x = restitution.
-        // Uses the position after this step's motion so particles never leave the box.
+        default: {}
+    }
+}
+
+fn apply_constraint(p: ptr<function, Particle>, m: Modifier) {
+    switch m.kind {
+        // Uses the position after this step's motion, to bounce before leaving the box.
         case MOD_BOUNDS: {
-            let lo = m.a.xy - m.a.zw;
-            let hi = m.a.xy + m.a.zw;
-            let next = (*p).position + (*p).velocity * dt;
+            let b = bounds_params(m);
+            let lo = b.center - b.half_extents;
+            let hi = b.center + b.half_extents;
+            let next = (*p).position + (*p).velocity * params.dt;
             if (next.x < lo.x && (*p).velocity.x < 0.0) || (next.x > hi.x && (*p).velocity.x > 0.0) {
-                (*p).velocity.x *= -m.b.x;
+                (*p).velocity.x *= -b.restitution;
             }
             if (next.y < lo.y && (*p).velocity.y < 0.0) || (next.y > hi.y && (*p).velocity.y > 0.0) {
-                (*p).velocity.y *= -m.b.x;
+                (*p).velocity.y *= -b.restitution;
             }
             (*p).position = clamp((*p).position, lo, hi);
         }
@@ -242,7 +242,6 @@ fn apply_force(p: ptr<function, Particle>, m: Modifier) {
     }
 }
 
-// Every kind: a = value, b.x = 1 to scale the current value or 0 to replace it.
 fn apply_appearance(p: ptr<function, Particle>, modifier: Modifier) {
     // Over-life tracks mean nothing to immortal particles. (Each kind has one parameter.)
     if modifier.track_count > 0u && (*p).lifetime < 0.0
@@ -250,21 +249,24 @@ fn apply_appearance(p: ptr<function, Particle>, modifier: Modifier) {
         return;
     }
     let m = resolve(modifier, *p);
-    let scale = m.b.x != 0.0;
 
     switch m.kind {
         case MOD_COLOR: {
-            let rgb = m.a.xyz * select(vec3(1.0), (*p).color.rgb, scale);
+            let c = color_params(m);
+            let rgb = c.value * select(vec3(1.0), (*p).color.rgb, c.scale != 0.0);
             (*p).color = vec4(rgb, (*p).color.a);
         }
         case MOD_ALPHA: {
-            (*p).color.a = m.a.x * select(1.0, (*p).color.a, scale);
+            let a = alpha_params(m);
+            (*p).color.a = a.value * select(1.0, (*p).color.a, a.scale != 0.0);
         }
         case MOD_SIZE: {
-            (*p).radius = m.a.x * select(1.0, (*p).radius, scale);
+            let s = size_params(m);
+            (*p).radius = s.value * select(1.0, (*p).radius, s.scale != 0.0);
         }
         case MOD_MASS: {
-            (*p).mass = m.a.x * select(1.0, (*p).mass, scale);
+            let s = mass_params(m);
+            (*p).mass = s.value * select(1.0, (*p).mass, s.scale != 0.0);
         }
         default: {}
     }
@@ -331,8 +333,8 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     p.base_color = vec2(pack2x16float(packed.xy), pack2x16float(packed.zw));
     // `integrate` won't see this particle until next frame, but it's drawn this frame: apply
     // appearance now so that e.g. a fade-in doesn't flash.
-    apply_modifiers(&p, params.modifier_offset, params.modifier_count, false);
-    apply_modifiers(&p, em.modifier_offset, em.modifier_count, false);
+    apply_appearances(&p, params.modifiers);
+    apply_appearances(&p, em.modifiers);
     particles[slot] = p;
 }
 

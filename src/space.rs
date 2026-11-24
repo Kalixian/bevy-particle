@@ -1,5 +1,6 @@
 use bevy::{
     asset::RenderAssetUsages,
+    camera::visibility::{RenderLayers, VisibilitySystems},
     prelude::*,
     render::{extract_resource::ExtractResource, render_resource::ShaderType, storage::ShaderBuffer},
 };
@@ -11,6 +12,7 @@ use crate::{
     gravity::{Gravity, MAX_GRAVITY_BODIES},
     modifier::{ModifierSystems, ModifierUpload, Modifiers, TargetAttractor},
     particle::{GpuParticle, ParticleBuffers},
+    render::ParticleRender,
 };
 
 /// The outer layer: settings and forces that apply to every particle in the space.
@@ -28,7 +30,8 @@ impl Plugin for SpacePlugin {
                 prepare_space_uploads
                     .after(sync_space_buffers)
                     .after(EmitterSystems)
-                    .after(ModifierSystems::Clear),
+                    .after(ModifierSystems::Clear)
+                    .after(VisibilitySystems::VisibilityPropagate),
             )
                 .after(TransformSystems::Propagate),
         );
@@ -38,12 +41,13 @@ impl Plugin for SpacePlugin {
 /// A particle space: a set of particles that share settings, forces and gravity. Emitters
 /// spawn into the nearest space among their ancestors.
 ///
-/// Spaces don't affect each other, and are drawn in order of their `Transform`'s z. Each has
+/// Spaces don't affect each other. Their `Transform`'s z orders them among sprites, and
+/// [`ParticleRender`] sets how their particles look. Each has
 /// its own GPU buffers, and gravity buffers only while it has [`Gravity`]. Despawning a space
 /// (which also despawns its emitters) frees its particles.
 #[derive(Component, Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[require(Transform, SpaceState)]
+#[require(Transform, Visibility, SpaceState)]
 pub struct ParticleSpace {
     /// Maximum number of live particles; must be above 0. Fixed once the space is created.
     pub capacity: u32,
@@ -69,9 +73,8 @@ pub struct SimParams {
     pub emitter_count: u32,
     /// Changes every frame; seeds the GPU random numbers.
     pub frame: u32,
-    /// The space's slice of the modifier array.
-    pub modifier_offset: u32,
-    pub modifier_count: u32,
+    /// The space's slice of the modifier array; see `ModifierUpload::push`.
+    pub modifiers: UVec4,
     /// 1 when the space has [`Gravity`].
     pub gravity_enabled: u32,
     pub gravity_strength: f32,
@@ -90,16 +93,20 @@ impl SimParams {
     }
 }
 
-/// Every space with buffers, in draw order, rebuilt each frame and sent to the render world.
+/// Every space with buffers, rebuilt each frame and sent to the render world.
 #[derive(Resource, Clone, Default, ExtractResource)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct SpaceUploads(pub Vec<SpaceUpload>);
 
 #[derive(Clone)]
 pub struct SpaceUpload {
+    pub entity: Entity,
     pub buffers: ParticleBuffers,
     pub params: SimParams,
-    z: f32,
+    pub render: ParticleRender,
+    pub z: f32,
+    pub visible: bool,
+    pub layers: RenderLayers,
 }
 
 /// Creates buffers for new spaces and drops those of spaces whose component was removed.
@@ -154,10 +161,10 @@ fn prepare_space_uploads(
             Entity,
             &ParticleBuffers,
             &mut SpaceState,
-            &GlobalTransform,
-            Option<&Modifiers>,
-            Option<&TargetAttractor>,
+            (&GlobalTransform, &InheritedVisibility, Option<&RenderLayers>),
+            (Option<&Modifiers>, Option<&TargetAttractor>),
             Option<&Gravity>,
+            Option<&ParticleRender>,
         ),
         With<ParticleSpace>,
     >,
@@ -166,9 +173,12 @@ fn prepare_space_uploads(
 ) {
     *frame = frame.wrapping_add(1);
     uploads.0.clear();
-    for (entity, buffers, mut state, transform, modifiers, attractor, gravity) in &mut spaces {
+    for (entity, buffers, mut state, placement, (modifiers, attractor), gravity, render) in
+        &mut spaces
+    {
+        let (transform, visibility, layers) = placement;
         let position = transform.translation();
-        let (modifier_offset, modifier_count) =
+        let modifiers =
             modifier_upload.push(modifiers, attractor, position.truncate(), state.age);
         if sim_ready.is_simulating(buffers.id()) {
             state.age += time.delta_secs();
@@ -182,8 +192,7 @@ fn prepare_space_uploads(
             spawn_total: spawns.count,
             emitter_count: emitters.emitters.len() as u32,
             frame: *frame,
-            modifier_offset,
-            modifier_count,
+            modifiers,
             gravity_enabled: gravity.is_some() as u32,
             gravity_strength: gravity.map_or(0.0, |g| g.strength),
             // Must stay above 0: a body's pull on itself is 0 · (0 + ε²)^(-3/2), NaN at ε = 0.
@@ -192,9 +201,16 @@ fn prepare_space_uploads(
             gravity_max_bodies: buffers.capacity.min(MAX_GRAVITY_BODIES),
             gravity_theta_sq: gravity.map_or(0.0, |g| g.theta * g.theta),
         };
-        uploads.0.push(SpaceUpload { buffers: buffers.clone(), params, z: position.z });
+        uploads.0.push(SpaceUpload {
+            entity,
+            buffers: buffers.clone(),
+            params,
+            render: render.cloned().unwrap_or_default(),
+            z: position.z,
+            visible: visibility.get(),
+            layers: layers.cloned().unwrap_or_default(),
+        });
     }
-    uploads.0.sort_by(|a, b| a.z.total_cmp(&b.z));
 }
 
 #[cfg(test)]
@@ -216,13 +232,16 @@ mod tests {
         app
     }
 
-    fn space(capacity: u32, z: f32) -> impl Bundle {
-        (ParticleSpace { capacity }, Transform::from_xyz(0.0, 0.0, z))
+    fn space(capacity: u32) -> ParticleSpace {
+        ParticleSpace { capacity }
     }
 
     fn uploads(app: &App) -> Vec<(u32, u32)> {
         let uploads = &app.world().resource::<SpaceUploads>().0;
-        uploads.iter().map(|u| (u.params.capacity, u.params.spawn_total)).collect()
+        let mut list: Vec<_> =
+            uploads.iter().map(|u| (u.params.capacity, u.params.spawn_total)).collect();
+        list.sort();
+        list
     }
 
     /// Pretends the GPU simulates every current space.
@@ -233,34 +252,34 @@ mod tests {
     }
 
     #[test]
-    fn spaces_are_uploaded_in_z_order_and_removed() {
+    fn spaces_are_uploaded_and_removed() {
         let mut app = app();
-        let front = app.world_mut().spawn(space(1, 5.0)).id();
-        let back = app.world_mut().spawn(space(2, -5.0)).id();
-        app.world_mut().spawn(space(0, 0.0)); // Ignored.
+        let first = app.world_mut().spawn(space(1)).id();
+        let second = app.world_mut().spawn(space(2)).id();
+        app.world_mut().spawn(space(0)); // Ignored.
         app.update();
-        assert_eq!(uploads(&app), [(2, 0), (1, 0)]);
+        assert_eq!(uploads(&app), [(1, 0), (2, 0)]);
 
-        app.world_mut().despawn(back);
+        app.world_mut().despawn(second);
         app.update();
         assert_eq!(uploads(&app), [(1, 0)]);
-        app.world_mut().entity_mut(front).remove::<ParticleSpace>();
+        app.world_mut().entity_mut(first).remove::<ParticleSpace>();
         app.update();
         assert!(uploads(&app).is_empty());
-        assert!(!app.world().entity(front).contains::<ParticleBuffers>());
+        assert!(!app.world().entity(first).contains::<ParticleBuffers>());
     }
 
     #[test]
     fn emitters_spawn_into_their_nearest_space_once_it_is_simulated() {
         let mut app = app();
         let burst = |burst_count| ParticleEmitter { burst_count, rate: 0.0, ..default() };
-        app.world_mut().spawn((space(10, 0.0), children![burst(3)]));
+        app.world_mut().spawn((space(10), children![burst(3)]));
         // Nested under a plain entity, and a space inside a space.
         app.world_mut().spawn((
-            space(20, 1.0),
+            space(20),
             children![
                 (Transform::default(), children![burst(4)]),
-                (ParticleSpace { capacity: 30 }, Transform::from_xyz(0.0, 0.0, 1.0), children![burst(5)]),
+                (space(30), children![burst(5)]),
             ],
         ));
         app.world_mut().spawn(burst(100)); // No space.
@@ -277,7 +296,7 @@ mod tests {
     #[test]
     fn recreated_buffers_wait_for_the_gpu_again() {
         let mut app = app();
-        let entity = app.world_mut().spawn(space(10, 0.0)).id();
+        let entity = app.world_mut().spawn(space(10)).id();
         app.update();
         simulate_all(&mut app);
         app.world_mut().entity_mut(entity).remove::<ParticleSpace>();

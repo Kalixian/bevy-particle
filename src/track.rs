@@ -5,6 +5,8 @@
 use bevy::{prelude::*, render::render_resource::ShaderType};
 use serde::{Deserialize, Serialize};
 
+use crate::modifier_kinds::ParamDef;
+
 /// A type that can be keyframed. Values are interpolated as (up to) four floats.
 pub trait Keyable: Copy {
     /// How many components of [`Keyable::to_vec4`] are used.
@@ -239,10 +241,15 @@ pub struct GpuTrackRecord {
     pub info: UVec4,
 }
 
-/// Collects one modifier's parameters into the eight floats of `GpuModifier`'s `a` and `b`.
+/// Collects one modifier's parameters, in the order its kind defines them, into the eight
+/// floats of `GpuModifier`'s `a` and `b`.
 pub(crate) struct ParamEncoder<'a> {
     records: &'a mut Vec<GpuTrackRecord>,
     owner_age: f32,
+    /// The parameters not yet written.
+    layout: std::slice::Iter<'static, ParamDef>,
+    /// Where the next parameter goes.
+    slot: usize,
     values: [f32; 8],
     track_count: u32,
     valid: bool,
@@ -250,18 +257,40 @@ pub(crate) struct ParamEncoder<'a> {
 
 impl<'a> ParamEncoder<'a> {
     /// `owner_age` is the current time of [`Track::over_time`] tracks.
-    pub fn new(records: &'a mut Vec<GpuTrackRecord>, owner_age: f32) -> Self {
-        Self { records, owner_age, values: [0.0; 8], track_count: 0, valid: true }
+    pub fn new(
+        records: &'a mut Vec<GpuTrackRecord>,
+        owner_age: f32,
+        layout: &'static [ParamDef],
+    ) -> Self {
+        Self {
+            records,
+            owner_age,
+            layout: layout.iter(),
+            slot: 0,
+            values: [0.0; 8],
+            track_count: 0,
+            valid: true,
+        }
     }
 
-    /// Writes `param` starting at float `slot`. Per-particle tracks are appended to the
+    /// The slot of the next parameter, which must be `width` floats wide.
+    fn next_slot(&mut self, width: usize) -> usize {
+        let param = self.layout.next().expect("more parameters than the kind defines");
+        assert_eq!(param.width, width, "parameter width differs from the kind's definition");
+        let slot = self.slot;
+        self.slot += width;
+        slot
+    }
+
+    /// Writes the next parameter. Per-particle tracks are appended to the
     /// records for the GPU to resolve; everything else becomes a constant here.
-    pub fn put<T: Keyable>(&mut self, slot: usize, param: &Animated<T>) {
-        self.put_offset(slot, param, Vec4::ZERO);
+    pub fn put<T: Keyable>(&mut self, param: &Animated<T>) {
+        self.put_offset(param, Vec4::ZERO);
     }
 
     /// Like [`Self::put`], adding `offset` to the value (or to every key).
-    pub fn put_offset<T: Keyable>(&mut self, slot: usize, param: &Animated<T>, offset: Vec4) {
+    pub fn put_offset<T: Keyable>(&mut self, param: &Animated<T>, offset: Vec4) {
+        let slot = self.next_slot(T::WIDTH as usize);
         let value = match param {
             Animated::Constant(value) => Some(value.to_vec4()),
             Animated::Track(track) if track.clock == Clock::Time => track.sample(self.owner_age),
@@ -297,13 +326,16 @@ impl<'a> ParamEncoder<'a> {
         }
     }
 
-    /// Writes a plain float that can't be animated.
-    pub fn put_raw(&mut self, slot: usize, value: f32) {
-        self.values[slot] = value;
+    /// Writes the next parameter as a plain value that can't be animated.
+    pub fn put_raw<T: Keyable>(&mut self, value: T) {
+        let width = T::WIDTH as usize;
+        let slot = self.next_slot(width);
+        self.values[slot..slot + width].copy_from_slice(&value.to_vec4().to_array()[..width]);
     }
 
     /// (`a`, `b`, track count), or `None` if a parameter's track was empty.
     pub fn finish(self) -> Option<(Vec4, Vec4, u32)> {
+        assert_eq!(self.layout.len(), 0, "fewer parameters than the kind defines");
         self.valid.then(|| {
             (
                 Vec4::from_slice(&self.values[..4]),

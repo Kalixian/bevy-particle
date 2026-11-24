@@ -14,6 +14,7 @@ use crate::{
     emitter::ParticleEmitter,
     gravity::Gravity,
     modifier::{Modifiers, TargetAttractor},
+    render::{BlendMode, ParticleRender, ParticleTexture, Playback},
     space::ParticleSpace,
 };
 
@@ -31,6 +32,7 @@ impl Plugin for EffectPlugin {
 #[derive(Asset, TypePath, Debug, Clone)]
 pub struct ParticleEffect {
     pub space: ParticleSpace,
+    pub render: ParticleRender,
     pub gravity: Option<Gravity>,
     /// Pulls every particle in the space; emitters can have their own too.
     pub attractor: Option<TargetAttractor>,
@@ -60,7 +62,11 @@ impl ParticleEffect {
     /// Spawns the space, with its emitters as children, and returns the space's entity.
     /// Despawning that entity removes the whole effect.
     pub fn spawn(&self, commands: &mut Commands) -> Entity {
-        let mut space = commands.spawn((self.space.clone(), self.modifiers.clone()));
+        let mut space = commands.spawn((
+            self.space.clone(),
+            self.render.clone(),
+            self.modifiers.clone(),
+        ));
         if let Some(gravity) = self.gravity {
             space.insert(gravity);
         }
@@ -90,12 +96,60 @@ impl ParticleEffect {
 struct EffectFile {
     space: ParticleSpace,
     #[serde(default)]
+    render: RenderFile,
+    #[serde(default)]
     gravity: Option<Gravity>,
     #[serde(default)]
     attractor: Option<TargetAttractor>,
     #[serde(default)]
     modifiers: Modifiers,
     emitters: Vec<EmitterEntry>,
+}
+
+/// [`ParticleRender`] as written in a file.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RenderFile {
+    blend: BlendMode,
+    softness: f32,
+    stretch: f32,
+    texture: Option<TextureFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextureFile {
+    /// Path of an image, found like [`EmitterSource::File`].
+    path: String,
+    #[serde(default = "one")]
+    columns: u32,
+    #[serde(default = "one")]
+    rows: u32,
+    #[serde(default)]
+    playback: Playback,
+}
+
+fn one() -> u32 {
+    1
+}
+
+impl RenderFile {
+    fn load(self, load_context: &mut LoadContext<'_>) -> Result<ParticleRender, BevyError> {
+        let texture = match self.texture {
+            Some(TextureFile { path, columns, rows, playback }) => {
+                let path = load_context.path().resolve_embed_str(&path)?;
+                let image = load_context.load(path);
+                Some(ParticleTexture { image, columns, rows, playback })
+            }
+            None => None,
+        };
+        Ok(ParticleRender {
+            blend: self.blend,
+            softness: self.softness,
+            stretch: self.stretch,
+            texture,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -154,6 +208,7 @@ impl AssetLoader for EffectLoader {
         }
         Ok(ParticleEffect {
             space: file.space,
+            render: file.render.load(load_context)?,
             gravity: file.gravity,
             attractor: file.attractor,
             modifiers: file.modifiers,
@@ -192,6 +247,7 @@ mod tests {
         app.add_plugins((
             MinimalPlugins,
             AssetPlugin { file_path: root.to_string(), ..default() },
+            ImagePlugin::default(),
             EffectPlugin,
         ));
         let server = app.world().resource::<AssetServer>().clone();
@@ -249,6 +305,29 @@ mod tests {
     }
 
     #[test]
+    fn render_settings_are_read() {
+        let effect = load(
+            "render",
+            &[(
+                "a/test.effect.ron",
+                r#"(space: (capacity: 8), emitters: [], render: (
+                    blend: Additive,
+                    stretch: 0.5,
+                    texture: (path: "smoke.png", columns: 4, playback: Fps(12.0)),
+                ))"#,
+            )],
+            "a/test.effect.ron",
+        )
+        .unwrap();
+        let render = effect.render;
+        assert_eq!((render.blend, render.softness, render.stretch), (BlendMode::Additive, 0.0, 0.5));
+        let texture = render.texture.unwrap();
+        assert_eq!(texture.image.path().unwrap(), &"a/smoke.png".into());
+        assert_eq!((texture.columns, texture.rows), (4, 1));
+        assert_eq!(texture.playback, Playback::Fps(12.0));
+    }
+
+    #[test]
     fn bad_emitter_files_are_errors() {
         let effect = r#"(space: (capacity: 8), emitters: [(source: File("e.emitter.ron"))])"#;
         let effect = ("test.effect.ron", effect);
@@ -264,6 +343,7 @@ mod tests {
         let mut world = World::new();
         let effect = ParticleEffect {
             space: ParticleSpace { capacity: 8 },
+            render: default(),
             gravity: None,
             attractor: None,
             modifiers: default(),

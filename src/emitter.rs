@@ -180,9 +180,8 @@ pub struct GpuEmitter {
     pub enabled: u32,
     /// The slot's generation; particles of any other generation are killed.
     pub generation: u32,
-    /// This emitter's slice of the modifier array.
-    pub modifier_offset: u32,
-    pub modifier_count: u32,
+    /// This emitter's slice of the modifier array; see `ModifierUpload::push`.
+    pub modifiers: UVec4,
     /// 1 if this emitter's particles take part in gravity.
     pub gravity: u32,
     pub speed_curve: u32,
@@ -321,8 +320,7 @@ fn prepare_emitter_upload(
         }
 
         let position = transform.translation().truncate();
-        let (modifier_offset, modifier_count) =
-            modifier_upload.push(modifiers, attractor, position, state.age);
+        let modifiers = modifier_upload.push(modifiers, attractor, position, state.age);
         state.age += dt;
 
         let curves = &mut upload.curves;
@@ -355,8 +353,7 @@ fn prepare_emitter_upload(
             spawn_count,
             enabled: 1,
             generation: slot.generation.into(),
-            modifier_offset,
-            modifier_count,
+            modifiers,
             gravity: emitter.gravity as u32,
             speed_curve,
             angle_curve,

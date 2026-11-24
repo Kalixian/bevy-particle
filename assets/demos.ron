@@ -3,6 +3,9 @@
 // Effects and emitters (see src/effect.rs):
 //
 // - An effect's emitters are File("name.emitter.ron") or Inline((emitter: (..), ..)).
+// - An effect's optional render: (blend: Additive, softness: 1.0, stretch: 0.05,
+//   texture: (path: "sheet.png", columns: 4, rows: 4, playback: Fps(12.0))).
+//   Blends: Alpha, Additive. Playback: OverLife, Fps(..), Random.
 // - Emitter fields left out use `ParticleEmitter::default()`.
 // - Random ranges: (from: 0.5, to: 2.0), optionally with shape: Low(3.0), High(3.0),
 //   Middle(3.0) or Falloff(6.0).

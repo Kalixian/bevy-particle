@@ -26,15 +26,25 @@ struct SimParams {
     spawn_total: u32,
     emitter_count: u32,
     frame: u32,
-    // The space's slice of `modifiers`.
-    modifier_offset: u32,
-    modifier_count: u32,
+    // Where the space's forces, constraints and appearance modifiers start, and the end.
+    modifiers: vec4<u32>,
     gravity_enabled: u32,
     gravity_strength: f32,
     gravity_softening_sq: f32,
     gravity_method: u32,
     gravity_max_bodies: u32,
     gravity_theta_sq: f32,
+}
+
+// Must match `GpuModifier` in src/modifier.rs; `a` and `b` hold the parameters,
+// unpacked by the functions in the generated `modifier_kinds` module.
+struct Modifier {
+    kind: u32,
+    // This modifier's tracks, back to back in `tracks`.
+    track_offset: u32,
+    track_count: u32,
+    a: vec4<f32>,
+    b: vec4<f32>,
 }
 
 fn is_alive(p: Particle) -> bool {

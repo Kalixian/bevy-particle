@@ -4,14 +4,19 @@ use bevy::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::track::{Animated, GpuTrackRecord, ParamEncoder, Rgb};
+use crate::{
+    modifier_kinds::{ModifierKind, Phase},
+    track::{Animated, GpuTrackRecord, ParamEncoder, Rgb},
+};
 
 /// Shared modifier plumbing. Which particles a modifier affects depends on where the
 /// [`Modifiers`] (or [`TargetAttractor`]) component sits:
 /// - on a `ParticleSpace`: every particle in the space;
 /// - on a `ParticleEmitter`: only that emitter's particles.
 ///
-/// Each frame, space modifiers run first, then emitter modifiers, each list in order.
+/// Each frame, all forces run first, then constraints ([`Modifier::Bounds`]), then appearance
+/// modifiers. Within each of those, space modifiers run before emitter modifiers, each list in
+/// order.
 pub struct ModifierPlugin;
 
 impl Plugin for ModifierPlugin {
@@ -29,7 +34,7 @@ impl Plugin for ModifierPlugin {
 /// nothing while there's no target. Put it on a `ParticleSpace` to pull every particle, or on a
 /// `ParticleEmitter` to pull only its own.
 ///
-/// It runs after the owner's [`Modifiers`] list and doesn't change it.
+/// It runs after the forces in the owner's [`Modifiers`] and doesn't change that list.
 #[derive(Component, Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetAttractor {
@@ -50,8 +55,11 @@ pub enum ModifierSystems {
     Clear,
 }
 
-/// Behaviors applied to particles every frame. Add a variant here and a matching `case` in
-/// `apply_force` or `apply_appearance` in `particle_sim.wesl`.
+/// Behaviors applied to particles every frame.
+///
+/// They run in this order: all forces, on top of any [`Gravity`](crate::Gravity); then
+/// constraints ([`Bounds`](Self::Bounds)), so no force can push particles past them; then
+/// appearance.
 ///
 /// Every parameter is an [`Animated`]: a constant or a keyframe `Track`, via `.into()`.
 ///
@@ -60,6 +68,8 @@ pub enum ModifierSystems {
 ///
 /// Positions (`offset`) are relative to the owning space or emitter, so attractors move
 /// with their owner.
+// To add one: a variant here, its arms in `kind` and `encode`, its row in `modifier_kinds.rs`,
+// and a `case` (and imports) in `particle_sim.wesl`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Modifier {
     /// Constant acceleration, e.g. wind or downward gravity.
@@ -96,6 +106,22 @@ pub enum Modifier {
     Mass(Blend, Animated<f32>),
 }
 
+impl Modifier {
+    fn kind(&self) -> ModifierKind {
+        match self {
+            Modifier::Acceleration(_) => ModifierKind::Acceleration,
+            Modifier::PointAttractor { .. } => ModifierKind::PointAttractor,
+            Modifier::Vortex { .. } => ModifierKind::Vortex,
+            Modifier::Drag(_) => ModifierKind::Drag,
+            Modifier::Bounds { .. } => ModifierKind::Bounds,
+            Modifier::Color(..) => ModifierKind::Color,
+            Modifier::Alpha(..) => ModifierKind::Alpha,
+            Modifier::Size(..) => ModifierKind::Size,
+            Modifier::Mass(..) => ModifierKind::Mass,
+        }
+    }
+}
+
 /// How an appearance modifier combines with the particle's current value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Blend {
@@ -119,8 +145,8 @@ impl Blend {
 #[serde(transparent)]
 pub struct Modifiers(pub Vec<Modifier>);
 
-/// One modifier as seen by the GPU. Must match `struct Modifier` in `particle_sim.wesl`.
-/// The meaning of `a` and `b` depends on `kind`; see [`GpuModifier::encode`].
+/// One modifier as seen by the GPU. Must match `struct Modifier` in `types.wesl`.
+/// The meaning of `a` and `b` depends on `kind`; see `modifier_kinds.rs`.
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct GpuModifier {
     pub kind: u32,
@@ -142,67 +168,43 @@ impl GpuModifier {
     ) -> Option<Self> {
         let start = records.len();
         let origin = origin.extend(0.0).extend(0.0);
-        let mut params = ParamEncoder::new(records, owner_age);
-        // Slots 0-3 are `a`, 4-7 are `b`.
-        let kind = match modifier {
-            Modifier::Acceleration(accel) => {
-                params.put(0, accel);
-                0
+        let kind = modifier.kind();
+        let mut params = ParamEncoder::new(records, owner_age, kind.def().params);
+        match modifier {
+            Modifier::Acceleration(accel) => params.put(accel),
+            Modifier::PointAttractor { offset, strength, max_accel }
+            | Modifier::Vortex { offset, strength, max_accel } => {
+                params.put_offset(offset, origin);
+                params.put(strength);
+                params.put(max_accel);
             }
-            Modifier::PointAttractor { offset, strength, max_accel } => {
-                params.put_offset(0, offset, origin);
-                params.put(2, strength);
-                params.put(3, max_accel);
-                1
-            }
-            Modifier::Vortex { offset, strength, max_accel } => {
-                params.put_offset(0, offset, origin);
-                params.put(2, strength);
-                params.put(3, max_accel);
-                2
-            }
-            Modifier::Drag(k) => {
-                params.put(0, k);
-                3
-            }
+            Modifier::Drag(k) => params.put(k),
             Modifier::Bounds { half_extents, restitution } => {
-                params.put_raw(0, origin.x);
-                params.put_raw(1, origin.y);
-                params.put(2, half_extents);
-                params.put(4, restitution);
-                4
+                params.put_raw(origin.truncate().truncate());
+                params.put(half_extents);
+                params.put(restitution);
             }
             Modifier::Color(blend, color) => {
-                params.put(0, color);
-                params.put_raw(4, blend.as_gpu());
-                5
+                params.put(color);
+                params.put_raw(blend.as_gpu());
             }
-            Modifier::Alpha(blend, value) => {
-                params.put(0, value);
-                params.put_raw(4, blend.as_gpu());
-                6
+            Modifier::Alpha(blend, value)
+            | Modifier::Size(blend, value)
+            | Modifier::Mass(blend, value) => {
+                params.put(value);
+                params.put_raw(blend.as_gpu());
             }
-            Modifier::Size(blend, value) => {
-                params.put(0, value);
-                params.put_raw(4, blend.as_gpu());
-                7
-            }
-            Modifier::Mass(blend, value) => {
-                params.put(0, value);
-                params.put_raw(4, blend.as_gpu());
-                8
-            }
-        };
+        }
         let Some((a, b, track_count)) = params.finish() else {
             records.truncate(start);
             return None;
         };
-        Some(Self { kind, track_offset: start as u32, track_count, a, b })
+        Some(Self { kind: kind.id(), track_offset: start as u32, track_count, a, b })
     }
 }
 
 /// Every space and emitter modifier for this frame, in one array. Owners refer to their
-/// slice of it by `(offset, count)`.
+/// slice of it by the range that [`ModifierUpload::push`] returns.
 #[derive(Resource, Clone, Default, ExtractResource)]
 #[extract_app(bevy::render::RenderApp)]
 pub struct ModifierUpload {
@@ -214,8 +216,9 @@ pub struct ModifierUpload {
 }
 
 impl ModifierUpload {
-    /// Appends an owner's `modifiers`, then its [`TargetAttractor`] if there is a target, and
-    /// returns their `(offset, count)` in the array. `origin` is the owner's world position and
+    /// Appends an owner's `modifiers`, grouped by phase, with its [`TargetAttractor`] (if there
+    /// is a target) after the forces. Returns where in the array its forces, constraints and
+    /// appearance modifiers start, and where they end. `origin` is the owner's world position and
     /// `owner_age` the seconds since it started.
     pub fn push(
         &mut self,
@@ -223,22 +226,26 @@ impl ModifierUpload {
         attractor: Option<&TargetAttractor>,
         origin: Vec2,
         owner_age: f32,
-    ) -> (u32, u32) {
-        let offset = self.modifiers.len() as u32;
-        if let Some(modifiers) = modifiers {
-            for modifier in modifiers.iter() {
-                self.push_one(modifier, origin, owner_age);
+    ) -> UVec4 {
+        let mut range = UVec4::ZERO;
+        for (i, phase) in Phase::ALL.into_iter().enumerate() {
+            range[i] = self.modifiers.len() as u32;
+            for modifier in modifiers.iter().flat_map(|list| list.iter()) {
+                if modifier.kind().def().phase == phase {
+                    self.push_one(modifier, origin, owner_age);
+                }
+            }
+            if let (Phase::Force, Some(attractor), Some(target)) = (phase, attractor, self.target) {
+                let modifier = Modifier::PointAttractor {
+                    offset: (target - origin).into(),
+                    strength: attractor.strength.clone(),
+                    max_accel: attractor.max_accel.clone(),
+                };
+                self.push_one(&modifier, origin, owner_age);
             }
         }
-        if let (Some(attractor), Some(target)) = (attractor, self.target) {
-            let modifier = Modifier::PointAttractor {
-                offset: (target - origin).into(),
-                strength: attractor.strength.clone(),
-                max_accel: attractor.max_accel.clone(),
-            };
-            self.push_one(&modifier, origin, owner_age);
-        }
-        (offset, self.modifiers.len() as u32 - offset)
+        range.w = self.modifiers.len() as u32;
+        range
     }
 
     fn push_one(&mut self, modifier: &Modifier, origin: Vec2, owner_age: f32) {
@@ -300,6 +307,29 @@ mod tests {
         // Seconds clock (1) + 2 · loop (1).
         assert_eq!(records[3].info, UVec4::new(2, 3, 3, 1));
         assert_eq!(records[3].data.x, 2.0);
+    }
+
+    #[test]
+    fn modifiers_are_grouped_by_phase_with_the_target_after_forces() {
+        let bounds =
+            Modifier::Bounds { half_extents: Vec2::ONE.into(), restitution: 1.0.into() };
+        let list = Modifiers(vec![
+            Modifier::Alpha(Blend::Set, 0.5.into()),
+            bounds,
+            Modifier::Drag(1.0.into()),
+            Modifier::Size(Blend::Scale, 2.0.into()),
+            Modifier::Acceleration(Vec2::X.into()),
+        ]);
+        let attractor = TargetAttractor { strength: 1.0.into(), max_accel: 1.0.into() };
+        let mut upload = ModifierUpload { target: Some(Vec2::ONE), ..default() };
+        upload.push(Some(&Modifiers(vec![Modifier::Drag(0.0.into())])), None, Vec2::ZERO, 0.0);
+        let range = upload.push(Some(&list), Some(&attractor), Vec2::ZERO, 0.0);
+
+        assert_eq!(range, UVec4::new(1, 4, 5, 7));
+        use ModifierKind::*;
+        let kinds: Vec<_> = upload.modifiers[1..].iter().map(|m| m.kind).collect();
+        let expected = [Drag, Acceleration, PointAttractor, Bounds, Alpha, Size];
+        assert_eq!(kinds, expected.map(ModifierKind::id));
     }
 
     #[test]

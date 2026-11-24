@@ -15,7 +15,6 @@
         ),
     ],
     emitters: [
-        (source: File("cloud.emitter.ron")),
         (source: File("cluster.emitter.ron")),
         (source: File("stream.emitter.ron"), position: (-450.0, -150.0)),
         (source: File("keyframes.emitter.ron"), position: (-400.0, 200.0)),

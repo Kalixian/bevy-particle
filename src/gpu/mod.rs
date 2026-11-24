@@ -18,7 +18,7 @@ use bevy::{
 };
 
 use crate::{
-    emitter::EmitterUpload, modifier::ModifierUpload, space::SpaceUploads,
+    emitter::EmitterUpload, modifier::ModifierUpload, modifier_kinds, space::SpaceUploads,
 };
 
 pub struct ParticleGpuPlugin;
@@ -31,6 +31,9 @@ impl Plugin for ParticleGpuPlugin {
         load_shader_library!(app, "shaders/types.wesl");
         load_shader_library!(app, "shaders/random.wesl");
         load_shader_library!(app, "shaders/tracks.wesl");
+        let kinds = Shader::from_wesl(modifier_kinds::wesl_source(), modifier_kinds::WESL_PATH);
+        let kinds = app.world_mut().resource_mut::<Assets<Shader>>().add(kinds);
+        app.insert_resource(GeneratedShaders { _modifier_kinds: kinds });
         embedded_asset!(app, "shaders/particle_sim.wesl");
         embedded_asset!(app, "shaders/particle_draw.wesl");
         embedded_asset!(app, "shaders/gravity_brute.wesl");
@@ -54,6 +57,12 @@ impl Plugin for ParticleGpuPlugin {
         compute::build(render_app);
         draw::build(render_app);
     }
+}
+
+/// Keeps shader modules without a file alive; others import them by path.
+#[derive(Resource)]
+struct GeneratedShaders {
+    _modifier_kinds: Handle<Shader>,
 }
 
 /// The particle buffers simulated in the last rendered frame. Emitters hold their spawns

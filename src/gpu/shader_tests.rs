@@ -20,7 +20,9 @@ use super::gravity::RadixPassParams;
 use crate::{
     emitter::GpuEmitter,
     modifier::GpuModifier,
+    modifier_kinds,
     particle::GpuParticle,
+    render::GpuRenderParams,
     space::SimParams,
     spread::{GpuCurve, CURVE_SAMPLES, NO_CURVE},
     track::GpuTrackRecord,
@@ -67,6 +69,8 @@ fn compile(name: &str) -> Arc<Module> {
         let path = format!("embedded://bevy_particle/gpu/shaders/{name}.wesl");
         cache.set_shader(id(i), Shader::from_wesl(*source, path));
     }
+    let kinds = Shader::from_wesl(modifier_kinds::wesl_source(), modifier_kinds::WESL_PATH);
+    cache.set_shader(id(SHADERS.len()), kinds);
     let index = SHADERS.iter().position(|(n, _)| *n == name).unwrap();
     cache.get(0, id(index), &[]).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
@@ -144,6 +148,7 @@ fn struct_layouts_match() {
     check_layout::<GpuModifier, _>("particle_sim", "Modifier");
     check_layout::<GpuCurve, _>("particle_sim", "Curve");
     check_layout::<GpuTrackRecord, _>("particle_sim", "TrackRecord");
+    check_layout::<GpuRenderParams, _>("particle_draw", "RenderParams");
     check_layout::<RadixPassParams, _>("gravity_bh", "RadixPass");
     for shader in ["particle_sim", "gravity_brute", "gravity_bh"] {
         check_layout::<SimParams, _>(shader, "SimParams");
