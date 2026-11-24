@@ -1,14 +1,13 @@
 use bevy::{
     prelude::*,
     render::{extract_resource::ExtractResource, render_resource::ShaderType},
-    window::PrimaryWindow,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::track::{Animated, GpuTrackRecord, ParamEncoder, Rgb};
 
 /// Shared modifier plumbing. Which particles a modifier affects depends on where the
-/// [`Modifiers`] (or [`MouseAttractor`]) component sits:
+/// [`Modifiers`] (or [`TargetAttractor`]) component sits:
 /// - on a `ParticleSpace`: every particle in the space;
 /// - on a `ParticleEmitter`: only that emitter's particles.
 ///
@@ -18,8 +17,7 @@ pub struct ModifierPlugin;
 impl Plugin for ModifierPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ModifierUpload>()
-            .init_resource::<MouseTarget>()
-            .add_systems(Update, update_mouse_target)
+            .init_resource::<AttractorTarget>()
             .add_systems(
                 PostUpdate,
                 clear_modifier_upload.in_set(ModifierSystems::Clear),
@@ -27,37 +25,24 @@ impl Plugin for ModifierPlugin {
     }
 }
 
-/// While the left mouse button is held, pulls particles toward the cursor like a
-/// [`Modifier::PointAttractor`] there; does nothing while it's released. Put it on a
-/// `ParticleSpace` to pull every particle, or on a `ParticleEmitter` to pull only its own.
+/// Pulls particles toward [`AttractorTarget`] like a [`Modifier::PointAttractor`] there; does
+/// nothing while there's no target. Put it on a `ParticleSpace` to pull every particle, or on a
+/// `ParticleEmitter` to pull only its own.
 ///
 /// It runs after the owner's [`Modifiers`] list and doesn't change it.
 #[derive(Component, Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MouseAttractor {
+pub struct TargetAttractor {
     /// Acceleration = strength / distance², like `PointAttractor`. Negative repels.
     pub strength: Animated<f32>,
     /// Upper limit on the acceleration.
     pub max_accel: Animated<f32>,
 }
 
-/// The cursor's world position while the left mouse button is held, otherwise `None`.
+/// Where every [`TargetAttractor`] pulls to, in world space, e.g. the cursor. Set it before
+/// `PostUpdate`; `None` turns them off.
 #[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct MouseTarget(pub Option<Vec2>);
-
-fn update_mouse_target(
-    buttons: Res<ButtonInput<MouseButton>>,
-    window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform)>,
-    mut target: ResMut<MouseTarget>,
-) {
-    let (camera, camera_transform) = *camera;
-    target.0 = buttons
-        .pressed(MouseButton::Left)
-        .then(|| window.cursor_position())
-        .flatten()
-        .and_then(|cursor| camera.viewport_to_world_2d(camera_transform, cursor).ok());
-}
+pub struct AttractorTarget(pub Option<Vec2>);
 
 /// Upload order: `Clear` runs before any system that calls [`ModifierUpload::push`].
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -224,18 +209,18 @@ pub struct ModifierUpload {
     modifiers: Vec<GpuModifier>,
     /// Keyframe tracks the modifiers refer to.
     tracks: Vec<GpuTrackRecord>,
-    /// This frame's [`MouseTarget`], copied in when the upload is cleared.
-    mouse_target: Option<Vec2>,
+    /// This frame's [`AttractorTarget`], copied in when the upload is cleared.
+    target: Option<Vec2>,
 }
 
 impl ModifierUpload {
-    /// Appends an owner's `modifiers`, then its [`MouseAttractor`] if the mouse is held, and
+    /// Appends an owner's `modifiers`, then its [`TargetAttractor`] if there is a target, and
     /// returns their `(offset, count)` in the array. `origin` is the owner's world position and
     /// `owner_age` the seconds since it started.
     pub fn push(
         &mut self,
         modifiers: Option<&Modifiers>,
-        mouse: Option<&MouseAttractor>,
+        attractor: Option<&TargetAttractor>,
         origin: Vec2,
         owner_age: f32,
     ) -> (u32, u32) {
@@ -245,13 +230,13 @@ impl ModifierUpload {
                 self.push_one(modifier, origin, owner_age);
             }
         }
-        if let (Some(mouse), Some(target)) = (mouse, self.mouse_target) {
-            let attractor = Modifier::PointAttractor {
+        if let (Some(attractor), Some(target)) = (attractor, self.target) {
+            let modifier = Modifier::PointAttractor {
                 offset: (target - origin).into(),
-                strength: mouse.strength.clone(),
-                max_accel: mouse.max_accel.clone(),
+                strength: attractor.strength.clone(),
+                max_accel: attractor.max_accel.clone(),
             };
-            self.push_one(&attractor, origin, owner_age);
+            self.push_one(&modifier, origin, owner_age);
         }
         (offset, self.modifiers.len() as u32 - offset)
     }
@@ -280,10 +265,10 @@ impl ModifierUpload {
     }
 }
 
-fn clear_modifier_upload(mut upload: ResMut<ModifierUpload>, mouse: Res<MouseTarget>) {
+fn clear_modifier_upload(mut upload: ResMut<ModifierUpload>, target: Res<AttractorTarget>) {
     upload.modifiers.clear();
     upload.tracks.clear();
-    upload.mouse_target = mouse.0;
+    upload.target = target.0;
 }
 
 #[cfg(test)]

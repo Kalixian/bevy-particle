@@ -1,0 +1,5 @@
+(
+    space: (capacity: 1000000),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    emitters: [(source: File("cloud.emitter.ron"))],
+)

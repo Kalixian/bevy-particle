@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     gpu::GpuSimReady,
-    modifier::{ModifierSystems, ModifierUpload, Modifiers, MouseAttractor},
+    modifier::{ModifierSystems, ModifierUpload, Modifiers, TargetAttractor},
     particle::ParticleBuffers,
     spread::{GpuCurve, Spread, NO_CURVE},
 };
@@ -239,7 +239,7 @@ fn prepare_emitter_upload(
         &mut EmitterState,
         &GlobalTransform,
         Option<&Modifiers>,
-        Option<&MouseAttractor>,
+        Option<&TargetAttractor>,
     )>,
     mut upload: ResMut<EmitterUpload>,
     mut modifier_upload: ResMut<ModifierUpload>,
@@ -253,7 +253,7 @@ fn prepare_emitter_upload(
     upload.emitters.clear();
     upload.curves.clear();
     for slot in &registry.slots {
-        let Some((emitter, mut state, transform, modifiers, mouse)) =
+        let Some((emitter, mut state, transform, modifiers, attractor)) =
             slot.entity.and_then(|e| emitters.get_mut(e).ok())
         else {
             upload.emitters.push(GpuEmitter::default());
@@ -270,7 +270,7 @@ fn prepare_emitter_upload(
 
         let position = transform.translation().truncate();
         let (modifier_offset, modifier_count) =
-            modifier_upload.push(modifiers, mouse, position, state.age);
+            modifier_upload.push(modifiers, attractor, position, state.age);
         state.age += dt;
 
         let curves = &mut upload.curves;

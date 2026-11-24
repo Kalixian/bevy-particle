@@ -1,0 +1,6 @@
+(
+    space: (capacity: 1000000),
+    gravity: (strength: 15.0, softening: 23.0, method: BarnesHut, theta: 0.5),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    emitters: [(source: File("cluster.emitter.ron"))],
+)

@@ -1,0 +1,5 @@
+(
+    space: (capacity: 1000000),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    emitters: [(source: File("stream.emitter.ron"), position: (-450.0, -150.0))],
+)

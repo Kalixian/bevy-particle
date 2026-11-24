@@ -9,7 +9,7 @@ use crate::{
     emitter::{EmitterSystems, EmitterUpload},
     gpu::GpuSimReady,
     gravity::{Gravity, MAX_GRAVITY_BODIES},
-    modifier::{ModifierSystems, ModifierUpload, Modifiers, MouseAttractor},
+    modifier::{ModifierSystems, ModifierUpload, Modifiers, TargetAttractor},
     particle::{GpuParticle, ParticleBuffers},
 };
 
@@ -140,21 +140,21 @@ fn update_sim_params(
             &mut SpaceState,
             &GlobalTransform,
             Option<&Modifiers>,
-            Option<&MouseAttractor>,
+            Option<&TargetAttractor>,
             Option<&Gravity>,
         ),
         With<ParticleSpace>,
     >,
     mut params: ResMut<SimParams>,
 ) {
-    let (Some((mut state, transform, modifiers, mouse, gravity)), Some(buffers)) =
+    let (Some((mut state, transform, modifiers, attractor, gravity)), Some(buffers)) =
         (space.iter_mut().next(), particle_buffers)
     else {
         *params = SimParams::default();
         return;
     };
     let (modifier_offset, modifier_count) =
-        modifier_upload.push(modifiers, mouse, transform.translation().truncate(), state.age);
+        modifier_upload.push(modifiers, attractor, transform.translation().truncate(), state.age);
     if sim_ready.is_simulating(buffers.space) {
         state.age += time.delta_secs();
     }

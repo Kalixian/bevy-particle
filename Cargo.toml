@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 # Logs per-pass GPU timings every 2 seconds and turns vsync off: `cargo run --features profile`
 profile = []
-# Reloads assets (shaders and demos.ron) when they're saved: `cargo run --features hot-reload`
+# Reloads shaders and effects when they're saved: `cargo run --features hot-reload`
 hot-reload = ["bevy/file_watcher", "bevy/embedded_watcher"]
 
 [dependencies]

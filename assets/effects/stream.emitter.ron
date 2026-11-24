@@ -1,0 +1,41 @@
+// A continuous stream; each particle lives 3-5 seconds (about 400k alive at once).
+// Pulled toward a fixed point, and toward the cursor while the mouse is held; shifts
+// cyan -> orange, fades and shrinks.
+(
+    emitter: (
+        rate: 100000.0,
+        lifetime: (from: 3.0, to: 5.0),
+        spawn_half_extents: (5.0, 5.0),
+        speed: (from: 120.0, to: 180.0),
+        angle: (from: 0.3, to: 0.6),
+        radius: (from: 0.4, to: 0.9),
+        alpha: (from: 0.1, to: 0.1),
+    ),
+    modifiers: [
+        PointAttractor(
+            // Relative to the emitter.
+            offset: Constant((750.0, 300.0)),
+            strength: Constant(400000.0),
+            max_accel: Constant(200.0),
+        ),
+        Color(Set, Track((
+            clock: Life,
+            keys: [
+                (time: 0.0, value: (0.1, 40.0, 120.0)),
+                (time: 1.0, value: (150.0, 20.0, 2.0)),
+            ],
+        ))),
+        Alpha(Set, Track((
+            clock: Life,
+            keys: [(time: 0.0, value: 0.1), (time: 1.0, value: 0.0)],
+        ))),
+        Size(Set, Track((
+            clock: Life,
+            keys: [(time: 0.0, value: 1.0), (time: 1.0, value: 0.3)],
+        ))),
+    ],
+    attractor: (
+        strength: Constant(400000.0),
+        max_accel: Constant(200.0),
+    ),
+)

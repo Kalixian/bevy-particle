@@ -80,7 +80,6 @@ impl From<Range<f32>> for Spread {
 /// How values are distributed across a [`Spread`]'s range. "Start" and "end" refer to the
 /// range as written, so `Low` on `8.0..0.5` favors 8.0.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-#[allow(dead_code)] // A toolbox: not every shape is used.
 pub enum Shape {
     /// Every value equally likely.
     #[default]

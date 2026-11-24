@@ -1,0 +1,6 @@
+(
+    space: (capacity: 1000000),
+    gravity: (strength: 1.0, softening: 5.0, method: BarnesHut, theta: 0.5),
+    attractor: (strength: Constant(3000000.0), max_accel: Constant(500.0)),
+    emitters: [(source: File("keyframes.emitter.ron"), position: (0.0, 0.0))],
+)

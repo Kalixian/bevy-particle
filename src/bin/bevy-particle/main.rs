@@ -1,15 +1,10 @@
-﻿mod camera;
+//! The demo app: shows the effects in `assets/`.
+
+mod camera;
+mod cursor;
 mod demos;
-mod emitter;
-mod gpu;
-mod gravity;
-mod modifier;
-mod particle;
 #[cfg(feature = "profile")]
 mod profiling;
-mod space;
-mod spread;
-mod track;
 
 use bevy::prelude::*;
 
@@ -17,11 +12,9 @@ fn main() {
     let mut app = App::new();
     app.add_plugins((
         default_plugins(),
+        bevy_particle::ParticlePlugin,
         camera::CameraPlugin,
-        modifier::ModifierPlugin,
-        space::SpacePlugin,
-        emitter::EmitterPlugin,
-        gpu::ParticleGpuPlugin,
+        cursor::CursorPlugin,
         demos::DemosPlugin,
     ));
 

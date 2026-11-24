@@ -1,0 +1,49 @@
+// Each particle runs blue -> magenta -> gold while fading in and out and slowing down,
+// inside a vortex that swings back and forth for all of them at once.
+(
+    emitter: (
+        rate: 55000.0,
+        lifetime: (from: 5.0, to: 8.0),
+        spawn_half_extents: (10.0, 10.0),
+        speed: (from: 50.0, to: 120.0),
+        radius: (from: 0.8, to: 1.2),
+        alpha: (from: 0.1, to: 0.2),
+        gravity: true,
+    ),
+    modifiers: [
+        Color(Set, Track((
+            clock: Life,
+            keys: [
+                (time: 0.0, value: (0.2, 2.0, 8.0)),
+                (time: 0.4, value: (6.0, 0.3, 5.0)),
+                (time: 1.0, value: (8.0, 4.0, 0.2)),
+            ],
+        ))),
+        // Scale keeps each particle's own random spawn alpha.
+        Alpha(Scale, Track((
+            clock: Life,
+            keys: [
+                (time: 0.0, value: 0.0),
+                (time: 0.15, value: 1.0),
+                (time: 0.8, value: 1.0),
+                (time: 1.0, value: 0.0),
+            ],
+        ))),
+        Drag(Track((
+            clock: Life,
+            keys: [(time: 0.0, value: 0.0), (time: 1.0, value: 3.0)],
+        ))),
+        Vortex(
+            offset: Constant((0.0, 0.0)),
+            strength: Track((
+                clock: Time,
+                repeat: PingPong,
+                keys: [
+                    (time: 0.0, value: 4000.0, ease: Smooth),
+                    (time: 3.0, value: -4000.0, ease: Smooth),
+                ],
+            )),
+            max_accel: Constant(120.0),
+        ),
+    ],
+)

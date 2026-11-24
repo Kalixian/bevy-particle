@@ -32,7 +32,7 @@ pub enum GravityMethod {
 }
 
 impl GravityMethod {
-    pub fn as_gpu(self) -> u32 {
+    pub(crate) fn as_gpu(self) -> u32 {
         match self {
             GravityMethod::BruteForce => 0,
             GravityMethod::BarnesHut => 1,

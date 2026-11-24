@@ -131,7 +131,6 @@ impl<T> Track<T> {
     }
 }
 
-#[allow(dead_code)] // The builders are for code; the demos load tracks from data.
 impl<T: Keyable> Track<T> {
     /// Key times are fractions of each particle's life, 0 to 1. On immortal particles, force
     /// parameters stay at their time-0 value and appearance modifiers are skipped.
