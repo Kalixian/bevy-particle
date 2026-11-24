@@ -1,0 +1,40 @@
+// Up to a million stars, crushed together and blown apart on an endless six-second cycle. Everything
+// is driven by one clock: the pull, the swirl, and the color.
+(
+    space: (capacity: 1000000),
+    render: (blend: Additive, softness: 1.0, stretch: 0.02),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    modifiers: [
+        PointAttractor(
+            offset: Constant((0.0, 0.0)),
+            strength: Track((clock: Time, repeat: Loop, keys: [
+                (time: 0.0, value: 80000000.0, ease: Step),
+                (time: 3.6, value: -60000000.0, ease: Step),
+                (time: 4.1, value: 0.0, ease: Step),
+                (time: 6.0, value: 0.0),
+            ])),
+            max_accel: Track((clock: Time, repeat: Loop, keys: [
+                (time: 0.0, value: 150.0, ease: Smooth),
+                (time: 3.6, value: 420.0, ease: Step),
+                (time: 3.6, value: 1150.0, ease: Step),
+                (time: 4.1, value: 0.0, ease: Step),
+                (time: 6.0, value: 0.0),
+            ])),
+        ),
+        Vortex(
+            offset: Constant((0.0, 0.0)),
+            strength: Track((clock: Time, repeat: Loop, keys: [(time: 0.0, value: 9000.0), (time: 3.6, value: 60000.0), (time: 3.7, value: 0.0), (time: 6.0, value: 0.0)])),
+            max_accel: Constant(160.0),
+        ),
+        Drag(Track((clock: Time, repeat: Loop, keys: [(time: 0.0, value: 1.0), (time: 3.6, value: 1.2), (time: 4.1, value: 1.0), (time: 6.0, value: 1.8)]))),
+        Alpha(Scale, Track((clock: Life, keys: [(time: 0.0, value: 0.0), (time: 0.15, value: 1.0), (time: 0.75, value: 1.0), (time: 1.0, value: 0.0)]))),
+        Color(Scale, Track((clock: Time, repeat: Loop, keys: [(time: 0.0, value: (0.35, 0.5, 1.4)), (time: 2.4, value: (0.7, 0.35, 1.5)), (time: 3.6, value: (1.0, 0.5, 1.2)), (time: 3.75, value: (2.2, 1.2, 0.5)), (time: 4.6, value: (1.8, 0.55, 0.15)), (time: 6.0, value: (0.35, 0.5, 1.4))]))),
+    ],
+    emitters: [(source: Inline((emitter: (
+        burst_count: 700000, rate: 120000.0, lifetime: (from: 5.0, to: 10.0),
+        spawn_half_extents: (700.0, 450.0), speed: (from: 0.0, to: 40.0),
+        radius: (from: 0.5, to: 2.8, shape: Falloff(9.0)),
+        red: (from: 0.6, to: 1.6), green: (from: 0.6, to: 1.4), blue: (from: 0.7, to: 1.6),
+        alpha: (from: 0.015, to: 0.07),
+    ))))],
+)

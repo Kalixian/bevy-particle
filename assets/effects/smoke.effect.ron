@@ -1,0 +1,65 @@
+// Colored smoke: puffs play a 16-frame sheet once over their lives while they grow, slow down
+// and fade. Drifting vortices curl the columns into each other.
+(
+    space: (capacity: 180000),
+    render: (texture: (path: "/textures/smoke.png", columns: 4, rows: 4, playback: OverLife)),
+    attractor: (strength: Constant(-8000000.0), max_accel: Constant(900.0)),
+    modifiers: [
+        Acceleration(Constant((0.0, 70.0))),
+        Vortex(
+            offset: Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: (-220.0, -60.0), ease: Smooth), (time: 5.0, value: (-60.0, 120.0), ease: Smooth)])),
+            strength: Constant(14000.0), max_accel: Constant(130.0),
+        ),
+        Vortex(
+            offset: Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: (220.0, 90.0), ease: Smooth), (time: 6.5, value: (90.0, -110.0), ease: Smooth)])),
+            strength: Constant(-14000.0), max_accel: Constant(130.0),
+        ),
+        Drag(Constant(0.75)),
+        Size(Scale, Track((clock: Life, keys: [(time: 0.0, value: 0.5), (time: 0.3, value: 2.0), (time: 1.0, value: 5.0)]))),
+        Alpha(Scale, Track((clock: Life, keys: [(time: 0.0, value: 0.0), (time: 0.1, value: 1.0), (time: 0.35, value: 1.0), (time: 1.0, value: 0.0)]))),
+    ],
+    emitters: [
+        (position: (-380.0, -330.0), source: Inline((
+            emitter: (
+                rate: 5000.0, lifetime: (from: 4.0, to: 8.0),
+                spawn_half_extents: (60.0, 12.0),
+                speed: (from: 80.0, to: 420.0),
+                angle: (from: 1.2, to: 1.7, shape: Middle(2.0)),
+                radius: (from: 3.0, to: 9.0, shape: Low(2.0)),
+                red: (from: 0.8, to: 1.0), green: (from: 0.1, to: 0.3), blue: (from: 0.3, to: 0.5),
+                alpha: (from: 0.015, to: 0.06),
+            ),
+            modifiers: [
+                PointAttractor(offset: Constant((0.0, 420.0)), strength: Constant(-2500000.0), max_accel: Constant(70.0)),
+            ],
+        ))),
+        (position: (0.0, -330.0), source: Inline((
+            emitter: (
+                rate: 5000.0, lifetime: (from: 4.0, to: 8.0),
+                spawn_half_extents: (60.0, 12.0),
+                speed: (from: 80.0, to: 420.0),
+                angle: (from: 1.35, to: 1.79, shape: Middle(2.0)),
+                radius: (from: 3.0, to: 9.0, shape: Low(2.0)),
+                red: (from: 0.8, to: 1.0), green: (from: 0.6, to: 0.8), blue: (from: 0.2, to: 0.35),
+                alpha: (from: 0.015, to: 0.06),
+            ),
+            modifiers: [
+                PointAttractor(offset: Constant((0.0, 420.0)), strength: Constant(-2500000.0), max_accel: Constant(70.0)),
+            ],
+        ))),
+        (position: (380.0, -330.0), source: Inline((
+            emitter: (
+                rate: 5000.0, lifetime: (from: 4.0, to: 8.0),
+                spawn_half_extents: (60.0, 12.0),
+                speed: (from: 80.0, to: 420.0),
+                angle: (from: 1.45, to: 1.95, shape: Middle(2.0)),
+                radius: (from: 3.0, to: 9.0, shape: Low(2.0)),
+                red: (from: 0.1, to: 0.25), green: (from: 0.4, to: 0.6), blue: (from: 0.8, to: 1.0),
+                alpha: (from: 0.015, to: 0.06),
+            ),
+            modifiers: [
+                PointAttractor(offset: Constant((0.0, 420.0)), strength: Constant(-2500000.0), max_accel: Constant(70.0)),
+            ],
+        ))),
+    ],
+)

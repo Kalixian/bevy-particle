@@ -1,6 +1,7 @@
 //! Switches between the effects listed in `assets/demos.ron`.
 //!
-//! Number keys pick an effect (in list order) and `R` restarts it. With
+//! The left and right arrow keys step through the effects, number keys pick one of the first
+//! nine, and `R` restarts the current one. With
 //! `cargo run --features hot-reload`, saving a file restarts the effect it belongs to.
 
 use bevy::{
@@ -143,6 +144,16 @@ fn select_scene(
         if keys.just_pressed(*key) {
             demos.current = index;
             demos.respawn = true;
+        }
+    }
+    let count = demos.scenes.len();
+    if count > 0 {
+        let steps = [(KeyCode::ArrowRight, 1), (KeyCode::ArrowLeft, count - 1)];
+        for (key, step) in steps {
+            if keys.just_pressed(key) {
+                demos.current = (demos.current + step) % count;
+                demos.respawn = true;
+            }
         }
     }
     let Some((name, handle)) = demos.scenes.get(demos.current).cloned() else {

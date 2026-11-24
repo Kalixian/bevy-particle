@@ -1,4 +1,5 @@
-// The demos, in number-key order. Each name is an effect, assets/effects/<name>.effect.ron.
+// The demos, in order: number keys reach the first nine, and the left and right arrows all of
+// them. Each name is an effect, assets/effects/<name>.effect.ron.
 //
 // Effects and emitters (see src/effect.rs):
 //
@@ -16,5 +17,21 @@
 // - Colors in modifiers are linear RGB; emitter red/green/blue are sRGB.
 (
     start: "cluster",
-    scenes: ["cloud", "cluster", "keyframes", "showcase", "stream"],
+    scenes: [
+        "cloud",
+        "cluster",
+        "keyframes",
+        "showcase",
+        "stream",
+        "embers",
+        "rainstorm",
+        "petals",
+        "shoal",
+        "supernova",
+        "rings",
+        "confetti",
+        "pinwheel",
+        "smoke",
+        "collision",
+    ],
 )

@@ -1,0 +1,43 @@
+// Cannons of confetti: each piece gets one of eight shapes at random, and turns with its motion.
+// Drag makes it flutter down, and it piles up on the floor.
+(
+    space: (capacity: 100000),
+    render: (stretch: 0.002, texture: (path: "/textures/shapes.png", columns: 4, rows: 2, playback: Random)),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    modifiers: [
+        Acceleration(Constant((0.0, -230.0))),
+        // Flutter, out of step from piece to piece.
+        Acceleration(Track((clock: Seconds, repeat: PingPong, keys: [(time: 0.0, value: (-160.0, 0.0), ease: Smooth), (time: 0.7, value: (160.0, 60.0), ease: Smooth)]))),
+        Drag(Constant(1.3)),
+        Bounds(half_extents: Constant((632.0, 352.0)), restitution: Constant(0.35)),
+        Size(Scale, Track((clock: Life, keys: [(time: 0.0, value: 0.4), (time: 0.05, value: 1.0), (time: 0.85, value: 1.0), (time: 1.0, value: 0.0)]))),
+        // Party lights.
+        Color(Scale, Track((clock: Time, repeat: Loop, keys: [(time: 0.0, value: (1.6, 1.0, 1.0), ease: Smooth), (time: 1.5, value: (1.0, 1.0, 1.8), ease: Smooth), (time: 3.0, value: (1.1, 1.6, 1.0), ease: Smooth), (time: 4.5, value: (1.6, 1.0, 1.0), ease: Smooth)]))),
+    ],
+    emitters: [
+        (position: (-560.0, -330.0), source: Inline((emitter: (
+            rate: 5000.0, lifetime: (from: 4.0, to: 8.0),
+            spawn_half_extents: (8.0, 8.0),
+            speed: (from: 350.0, to: 1250.0, shape: Middle(0.7)),
+            angle: (from: 0.75, to: 1.35, shape: Middle(2.0)),
+            radius: (from: 2.5, to: 8.0, shape: Low(3.0)),
+            red: (from: 0.1, to: 1.0), green: (from: 0.1, to: 1.0), blue: (from: 0.1, to: 1.0),
+        )))),
+        (position: (0.0, -330.0), source: Inline((emitter: (
+            rate: 5000.0, lifetime: (from: 4.0, to: 8.0),
+            spawn_half_extents: (8.0, 8.0),
+            speed: (from: 350.0, to: 1250.0, shape: Middle(0.7)),
+            angle: (from: 1.2, to: 1.94, shape: Middle(2.0)),
+            radius: (from: 2.5, to: 8.0, shape: Low(3.0)),
+            red: (from: 0.1, to: 1.0), green: (from: 0.1, to: 1.0), blue: (from: 0.1, to: 1.0),
+        )))),
+        (position: (560.0, -330.0), source: Inline((emitter: (
+            rate: 5000.0, lifetime: (from: 4.0, to: 8.0),
+            spawn_half_extents: (8.0, 8.0),
+            speed: (from: 350.0, to: 1250.0, shape: Middle(0.7)),
+            angle: (from: 1.79, to: 2.39, shape: Middle(2.0)),
+            radius: (from: 2.5, to: 8.0, shape: Low(3.0)),
+            red: (from: 0.1, to: 1.0), green: (from: 0.1, to: 1.0), blue: (from: 0.1, to: 1.0),
+        )))),
+    ],
+)

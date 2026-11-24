@@ -1,0 +1,83 @@
+// Counter-rotating rings that gather themselves: where a vortex, drag and an inverse-square
+// pull balance, orbits settle at radius = vortex^2 / (pull * drag^2). Each ring's vortex
+// breathes at its own rate, and so does its radius.
+(
+    space: (capacity: 1000000),
+    render: (blend: Additive, softness: 1.0, stretch: 0.04),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    modifiers: [
+        Drag(Constant(1.0)),
+        Alpha(Scale, Track((clock: Life, keys: [(time: 0.0, value: 0.0), (time: 0.4, value: 1.0), (time: 0.75, value: 1.0), (time: 1.0, value: 0.0)]))),
+    ],
+    emitters: [
+        // From the inside out.
+        (source: Inline((
+            emitter: (
+                rate: 20000.0, lifetime: (from: 4.0, to: 8.0),
+                spawn_half_extents: (66.0, 66.0), speed: (from: 0.0, to: 30.0),
+                radius: (from: 0.4, to: 1.8, shape: Falloff(6.0)),
+                alpha: (from: 0.05, to: 0.16),
+            ),
+            modifiers: [
+                PointAttractor(offset: Constant((0.0, 0.0)), strength: Constant(2400000.0), max_accel: Constant(1500.0)),
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: 11160.0, ease: Smooth), (time: 2.0, value: 12840.0, ease: Smooth)])),
+                    max_accel: Constant(900.0),
+                ),
+                Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (3.0, 2.5, 1.5)), (time: 1.0, value: (4.0, 1.5, 0.2))]))),
+            ],
+        ))),
+        (source: Inline((
+            emitter: (
+                rate: 35000.0, lifetime: (from: 4.0, to: 8.0),
+                spawn_half_extents: (143.0, 143.0), speed: (from: 0.0, to: 30.0),
+                radius: (from: 0.4, to: 1.8, shape: Falloff(6.0)),
+                alpha: (from: 0.05, to: 0.16),
+            ),
+            modifiers: [
+                PointAttractor(offset: Constant((0.0, 0.0)), strength: Constant(8788000.0), max_accel: Constant(1500.0)),
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: -31434.0, ease: Smooth), (time: 3.1, value: -36166.0, ease: Smooth)])),
+                    max_accel: Constant(900.0),
+                ),
+                Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (6.0, 1.2, 0.5)), (time: 1.0, value: (4.0, 0.2, 1.6))]))),
+            ],
+        ))),
+        (source: Inline((
+            emitter: (
+                rate: 50000.0, lifetime: (from: 4.0, to: 8.0),
+                spawn_half_extents: (236.5, 236.5), speed: (from: 0.0, to: 30.0),
+                radius: (from: 0.4, to: 1.8, shape: Falloff(6.0)),
+                alpha: (from: 0.05, to: 0.16),
+            ),
+            modifiers: [
+                PointAttractor(offset: Constant((0.0, 0.0)), strength: Constant(22016000.0), max_accel: Constant(1500.0)),
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: 63984.0, ease: Smooth), (time: 4.3, value: 73616.0, ease: Smooth)])),
+                    max_accel: Constant(900.0),
+                ),
+                Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (3.5, 0.4, 4.0)), (time: 1.0, value: (0.8, 0.5, 6.0))]))),
+            ],
+        ))),
+        (source: Inline((
+            emitter: (
+                rate: 60000.0, lifetime: (from: 4.0, to: 8.0),
+                spawn_half_extents: (335.5, 335.5), speed: (from: 0.0, to: 30.0),
+                radius: (from: 0.4, to: 1.8, shape: Falloff(6.0)),
+                alpha: (from: 0.05, to: 0.16),
+            ),
+            modifiers: [
+                PointAttractor(offset: Constant((0.0, 0.0)), strength: Constant(39528000.0), max_accel: Constant(1500.0)),
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: -102114.0, ease: Smooth), (time: 5.7, value: -117486.0, ease: Smooth)])),
+                    max_accel: Constant(900.0),
+                ),
+                Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (0.3, 1.6, 6.0)), (time: 1.0, value: (0.2, 4.0, 3.0))]))),
+            ],
+        ))),
+    ],
+)

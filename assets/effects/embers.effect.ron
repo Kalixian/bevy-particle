@@ -1,0 +1,44 @@
+// Sparks stretched along their motion, thrown up by a fire and swept by a gusting wind. Most
+// are small and short-lived (Falloff); the few big ones bounce along the floor.
+(
+    space: (capacity: 400000),
+    render: (blend: Additive, softness: 0.6, stretch: 0.03),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    modifiers: [
+        Acceleration(Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: (-130.0, 0.0), ease: Smooth), (time: 2.5, value: (130.0, 0.0), ease: Smooth)]))),
+        Vortex(offset: Constant((-260.0, 40.0)), strength: Constant(26000.0), max_accel: Constant(260.0)),
+        Vortex(offset: Constant((260.0, 40.0)), strength: Constant(-26000.0), max_accel: Constant(260.0)),
+        Drag(Constant(0.5)),
+        Bounds(half_extents: Constant((630.0, 345.0)), restitution: Constant(0.55)),
+        Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (9.0, 5.0, 1.6)), (time: 0.25, value: (8.0, 2.2, 0.2)), (time: 0.7, value: (3.0, 0.25, 0.02)), (time: 1.0, value: (0.4, 0.02, 0.0))]))),
+        Alpha(Scale, Track((clock: Life, keys: [(time: 0.0, value: 0.0), (time: 0.02, value: 1.0), (time: 0.5, value: 1.0), (time: 1.0, value: 0.0)]))),
+        Size(Scale, Track((clock: Life, keys: [(time: 0.0, value: 1.0), (time: 1.0, value: 0.3)]))),
+    ],
+    emitters: [
+        // The fire: a wide fan of fine sparks.
+        (position: (0.0, -330.0), source: Inline((
+            emitter: (
+                rate: 110000.0,
+                lifetime: (from: 0.6, to: 5.0, shape: Falloff(3.0)),
+                spawn_half_extents: (200.0, 6.0),
+                speed: (from: 80.0, to: 760.0, shape: Low(1.4)),
+                angle: (from: 1.1, to: 2.04, shape: Middle(2.0)),
+                radius: (from: 0.5, to: 2.6, shape: Falloff(7.0)),
+                alpha: (from: 0.03, to: 0.22),
+            ),
+            modifiers: [Acceleration(Constant((0.0, 110.0)))],
+        ))),
+        // Heavy sparks, which fall back and bounce.
+        (position: (0.0, -320.0), source: Inline((
+            emitter: (
+                rate: 14000.0,
+                lifetime: (from: 2.0, to: 6.0),
+                spawn_half_extents: (60.0, 4.0),
+                speed: (from: 250.0, to: 800.0),
+                angle: (from: 0.9, to: 2.24),
+                radius: (from: 0.7, to: 1.8, shape: Low(3.0)),
+            ),
+            modifiers: [Acceleration(Constant((0.0, -420.0)))],
+        ))),
+    ],
+)

@@ -1,0 +1,89 @@
+// Six colored jets wound up and unwound by a vortex that keeps reversing. A pulsing pull draws
+// the arms back in, and long streaks show the flow.
+(
+    space: (capacity: 1000000),
+    render: (blend: Additive, softness: 0.8, stretch: 0.06),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    modifiers: [
+        Vortex(
+            offset: Constant((0.0, 0.0)),
+            strength: Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: -60000.0, ease: Smooth), (time: 5.0, value: 60000.0, ease: Smooth)])),
+            max_accel: Constant(320.0),
+        ),
+        PointAttractor(
+            offset: Constant((0.0, 0.0)),
+            strength: Track((clock: Time, repeat: PingPong, keys: [(time: 0.0, value: 500000.0, ease: Smooth), (time: 1.7, value: 5000000.0, ease: Smooth)])),
+            max_accel: Constant(220.0),
+        ),
+        Drag(Track((clock: Life, keys: [(time: 0.0, value: 0.1), (time: 1.0, value: 0.9)]))),
+        Alpha(Scale, Track((clock: Life, keys: [(time: 0.0, value: 0.0), (time: 0.05, value: 1.0), (time: 0.6, value: 1.0), (time: 1.0, value: 0.0)]))),
+    ],
+    emitters: [
+        (position: (40.0, 0.0), source: Inline((
+            emitter: (
+                rate: 45000.0, lifetime: (from: 2.0, to: 4.5),
+                spawn_half_extents: (3.0, 3.0),
+                speed: (from: 60.0, to: 330.0, shape: High(2.0)),
+                angle: (from: -0.350, to: 0.350, shape: Middle(3.0)),
+                radius: (from: 0.4, to: 1.6, shape: Falloff(5.0)),
+                alpha: (from: 0.05, to: 0.18),
+            ),
+            modifiers: [Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (6.0, 0.6, 0.4)), (time: 1.0, value: (4.0, 0.2, 3.0))])))],
+        ))),
+        (position: (20.0, 34.6), source: Inline((
+            emitter: (
+                rate: 45000.0, lifetime: (from: 2.0, to: 4.5),
+                spawn_half_extents: (3.0, 3.0),
+                speed: (from: 60.0, to: 330.0, shape: High(2.0)),
+                angle: (from: 0.697, to: 1.397, shape: Middle(3.0)),
+                radius: (from: 0.4, to: 1.6, shape: Falloff(5.0)),
+                alpha: (from: 0.05, to: 0.18),
+            ),
+            modifiers: [Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (5.0, 3.0, 0.3)), (time: 1.0, value: (6.0, 0.6, 0.1))])))],
+        ))),
+        (position: (-20.0, 34.6), source: Inline((
+            emitter: (
+                rate: 45000.0, lifetime: (from: 2.0, to: 4.5),
+                spawn_half_extents: (3.0, 3.0),
+                speed: (from: 60.0, to: 330.0, shape: High(2.0)),
+                angle: (from: 1.744, to: 2.444, shape: Middle(3.0)),
+                radius: (from: 0.4, to: 1.6, shape: Falloff(5.0)),
+                alpha: (from: 0.05, to: 0.18),
+            ),
+            modifiers: [Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (0.4, 5.0, 1.5)), (time: 1.0, value: (2.5, 4.0, 0.2))])))],
+        ))),
+        (position: (-40.0, 0.0), source: Inline((
+            emitter: (
+                rate: 45000.0, lifetime: (from: 2.0, to: 4.5),
+                spawn_half_extents: (3.0, 3.0),
+                speed: (from: 60.0, to: 330.0, shape: High(2.0)),
+                angle: (from: 2.792, to: 3.492, shape: Middle(3.0)),
+                radius: (from: 0.4, to: 1.6, shape: Falloff(5.0)),
+                alpha: (from: 0.05, to: 0.18),
+            ),
+            modifiers: [Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (0.3, 4.0, 5.0)), (time: 1.0, value: (0.2, 4.0, 1.5))])))],
+        ))),
+        (position: (-20.0, -34.6), source: Inline((
+            emitter: (
+                rate: 45000.0, lifetime: (from: 2.0, to: 4.5),
+                spawn_half_extents: (3.0, 3.0),
+                speed: (from: 60.0, to: 330.0, shape: High(2.0)),
+                angle: (from: 3.839, to: 4.539, shape: Middle(3.0)),
+                radius: (from: 0.4, to: 1.6, shape: Falloff(5.0)),
+                alpha: (from: 0.05, to: 0.18),
+            ),
+            modifiers: [Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (0.5, 1.2, 7.0)), (time: 1.0, value: (0.2, 4.0, 5.0))])))],
+        ))),
+        (position: (20.0, -34.6), source: Inline((
+            emitter: (
+                rate: 45000.0, lifetime: (from: 2.0, to: 4.5),
+                spawn_half_extents: (3.0, 3.0),
+                speed: (from: 60.0, to: 330.0, shape: High(2.0)),
+                angle: (from: 4.886, to: 5.586, shape: Middle(3.0)),
+                radius: (from: 0.4, to: 1.6, shape: Falloff(5.0)),
+                alpha: (from: 0.05, to: 0.18),
+            ),
+            modifiers: [Color(Set, Track((clock: Life, keys: [(time: 0.0, value: (4.0, 0.5, 6.0)), (time: 1.0, value: (0.5, 0.8, 7.0))])))],
+        ))),
+    ],
+)

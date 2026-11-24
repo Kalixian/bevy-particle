@@ -1,0 +1,146 @@
+// Two spinning star clusters thrown at each other under their own gravity (300,000 bodies).
+// Their mass ebbs and returns (Mass), so the wreck loosens and clenches; a faint pull keeps it
+// on screen.
+(
+    space: (capacity: 300000),
+    render: (blend: Additive, softness: 1.0, stretch: 0.015),
+    gravity: (strength: 8.0, softening: 14.0, method: BarnesHut, theta: 0.6),
+    attractor: (strength: Constant(2000000.0), max_accel: Constant(400.0)),
+    modifiers: [
+        PointAttractor(
+            offset: Constant((0.0, 0.0)),
+            strength: Constant(4000000.0),
+            max_accel: Constant(25.0),
+        ),
+        Drag(Constant(0.015)),
+        Mass(Scale, Track((clock: Time, repeat: Loop, keys: [(time: 0.0, value: 1.0, ease: Smooth), (time: 9.0, value: 1.0, ease: Smooth), (time: 11.0, value: 0.25, ease: Smooth), (time: 15.0, value: 1.0, ease: Smooth)]))),
+    ],
+    emitters: [
+        (position: (-330.0, 70.0), source: Inline((
+            emitter: (
+                burst_count: 45000, rate: 0.0, lifetime: None,
+                spawn_half_extents: (50.0, 50.0),
+                speed: (from: 0.0, to: 110.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
+                mass_per_radius: 6.0,
+                red: (from: 2.4, to: 3.2), green: (from: 1.0, to: 1.7), blue: (from: 0.3, to: 0.7),
+                alpha: (from: 0.04, to: 0.12),
+                gravity: true,
+            ),
+            modifiers: [
+                // Spins it up, and pushes it toward the other one.
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, keys: [(time: 0.0, value: 22000.0), (time: 1.0, value: 0.0)])),
+                    max_accel: Constant(200.0),
+                ),
+                Acceleration(Track((clock: Time, keys: [(time: 0.0, value: (60.0, 0.0), ease: Step), (time: 1.0, value: (0.0, 0.0))]))),
+            ],
+        ))),
+        (position: (-330.0, 70.0), source: Inline((
+            emitter: (
+                burst_count: 55000, rate: 0.0, lifetime: None,
+                spawn_half_extents: (95.0, 95.0),
+                speed: (from: 0.0, to: 110.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
+                mass_per_radius: 6.0,
+                red: (from: 2.4, to: 3.2), green: (from: 1.0, to: 1.7), blue: (from: 0.3, to: 0.7),
+                alpha: (from: 0.04, to: 0.12),
+                gravity: true,
+            ),
+            modifiers: [
+                // Spins it up, and pushes it toward the other one.
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, keys: [(time: 0.0, value: 22000.0), (time: 1.0, value: 0.0)])),
+                    max_accel: Constant(200.0),
+                ),
+                Acceleration(Track((clock: Time, keys: [(time: 0.0, value: (60.0, 0.0), ease: Step), (time: 1.0, value: (0.0, 0.0))]))),
+            ],
+        ))),
+        (position: (-330.0, 70.0), source: Inline((
+            emitter: (
+                burst_count: 50000, rate: 0.0, lifetime: None,
+                spawn_half_extents: (150.0, 150.0),
+                speed: (from: 0.0, to: 110.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
+                mass_per_radius: 6.0,
+                red: (from: 2.4, to: 3.2), green: (from: 1.0, to: 1.7), blue: (from: 0.3, to: 0.7),
+                alpha: (from: 0.04, to: 0.12),
+                gravity: true,
+            ),
+            modifiers: [
+                // Spins it up, and pushes it toward the other one.
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, keys: [(time: 0.0, value: 22000.0), (time: 1.0, value: 0.0)])),
+                    max_accel: Constant(200.0),
+                ),
+                Acceleration(Track((clock: Time, keys: [(time: 0.0, value: (60.0, 0.0), ease: Step), (time: 1.0, value: (0.0, 0.0))]))),
+            ],
+        ))),
+        (position: (330.0, -70.0), source: Inline((
+            emitter: (
+                burst_count: 45000, rate: 0.0, lifetime: None,
+                spawn_half_extents: (50.0, 50.0),
+                speed: (from: 0.0, to: 110.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
+                mass_per_radius: 6.0,
+                red: (from: 0.3, to: 0.7), green: (from: 1.0, to: 1.7), blue: (from: 2.4, to: 3.2),
+                alpha: (from: 0.04, to: 0.12),
+                gravity: true,
+            ),
+            modifiers: [
+                // Spins it up, and pushes it toward the other one.
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, keys: [(time: 0.0, value: 22000.0), (time: 1.0, value: 0.0)])),
+                    max_accel: Constant(200.0),
+                ),
+                Acceleration(Track((clock: Time, keys: [(time: 0.0, value: (-60.0, 0.0), ease: Step), (time: 1.0, value: (0.0, 0.0))]))),
+            ],
+        ))),
+        (position: (330.0, -70.0), source: Inline((
+            emitter: (
+                burst_count: 55000, rate: 0.0, lifetime: None,
+                spawn_half_extents: (95.0, 95.0),
+                speed: (from: 0.0, to: 110.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
+                mass_per_radius: 6.0,
+                red: (from: 0.3, to: 0.7), green: (from: 1.0, to: 1.7), blue: (from: 2.4, to: 3.2),
+                alpha: (from: 0.04, to: 0.12),
+                gravity: true,
+            ),
+            modifiers: [
+                // Spins it up, and pushes it toward the other one.
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, keys: [(time: 0.0, value: 22000.0), (time: 1.0, value: 0.0)])),
+                    max_accel: Constant(200.0),
+                ),
+                Acceleration(Track((clock: Time, keys: [(time: 0.0, value: (-60.0, 0.0), ease: Step), (time: 1.0, value: (0.0, 0.0))]))),
+            ],
+        ))),
+        (position: (330.0, -70.0), source: Inline((
+            emitter: (
+                burst_count: 50000, rate: 0.0, lifetime: None,
+                spawn_half_extents: (150.0, 150.0),
+                speed: (from: 0.0, to: 110.0),
+                radius: (from: 0.5, to: 2.8, shape: Falloff(12.0)),
+                mass_per_radius: 6.0,
+                red: (from: 0.3, to: 0.7), green: (from: 1.0, to: 1.7), blue: (from: 2.4, to: 3.2),
+                alpha: (from: 0.04, to: 0.12),
+                gravity: true,
+            ),
+            modifiers: [
+                // Spins it up, and pushes it toward the other one.
+                Vortex(
+                    offset: Constant((0.0, 0.0)),
+                    strength: Track((clock: Time, keys: [(time: 0.0, value: 22000.0), (time: 1.0, value: 0.0)])),
+                    max_accel: Constant(200.0),
+                ),
+                Acceleration(Track((clock: Time, keys: [(time: 0.0, value: (-60.0, 0.0), ease: Step), (time: 1.0, value: (0.0, 0.0))]))),
+            ],
+        ))),
+    ],
+)
